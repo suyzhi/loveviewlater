@@ -311,6 +311,12 @@ async function init() {
     if (e.target.files[0]) { importData(e.target.files[0]); e.target.value = ''; }
   });
 
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg.type === 'closePanel') {
+      window.close();
+    }
+  });
+
   chrome.storage.onChanged.addListener((changes) => {
     if (changes[STORAGE_KEY]) {
       renderList(changes[STORAGE_KEY].newValue || []);

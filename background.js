@@ -11,8 +11,12 @@ chrome.runtime.onInstalled.addListener(() => {
   });
 });
 
-chrome.action.onClicked.addListener((tab) => {
-  chrome.sidePanel.open({ windowId: tab.windowId });
+chrome.action.onClicked.addListener(async (tab) => {
+  try {
+    await chrome.runtime.sendMessage({ type: 'closePanel' });
+  } catch {
+    chrome.sidePanel.open({ windowId: tab.windowId });
+  }
 });
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
