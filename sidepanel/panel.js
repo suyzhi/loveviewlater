@@ -317,6 +317,10 @@ async function init() {
   chrome.storage.onChanged.addListener((changes) => {
     if (changes[STORAGE_KEY]) renderList(changes[STORAGE_KEY].newValue || []);
   });
+
+  window.addEventListener('pagehide', () => {
+    document.getElementById('app').classList.add('slide-out');
+  });
 }
 
 document.addEventListener('DOMContentLoaded', init);
