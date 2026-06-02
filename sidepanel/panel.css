@@ -39,10 +39,21 @@ body {
   overflow-x: hidden;
 }
 
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes fadeOut {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
 #app {
   display: flex;
   flex-direction: column;
   min-height: 100vh;
+  animation: fadeIn 0.25s ease;
 }
 
 .header {
@@ -92,6 +103,22 @@ body {
 .btn-danger:hover {
   background: var(--danger);
   color: #fff;
+}
+
+.btn-outline {
+  background: transparent;
+  color: var(--primary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.btn-outline:hover {
+  border-color: var(--primary);
+  background: rgba(66, 133, 244, 0.08);
 }
 
 .empty-state {
@@ -203,6 +230,14 @@ body {
   position: sticky;
   bottom: 0;
   background: var(--bg);
+  gap: 12px;
+}
+
+.footer-left,
+.footer-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .count {

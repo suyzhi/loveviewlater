@@ -7,6 +7,9 @@ const elements = {
   count: document.getElementById('count'),
   addBtn: document.getElementById('addBtn'),
   clearBtn: document.getElementById('clearBtn'),
+  exportBtn: document.getElementById('exportBtn'),
+  importBtn: document.getElementById('importBtn'),
+  importFileInput: document.getElementById('importFileInput'),
 };
 
 async function getList() {
@@ -138,12 +141,54 @@ async function clearAll() {
   renderList([]);
 }
 
+async function exportData() {
+  const list = await getList();
+  if (list.length === 0) {
+    alert('列表为空，无需导出');
+    return;
+  }
+  const blob = new Blob([JSON.stringify({ version: 1, exportedAt: Date.now(), list }, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `稍后再看备份_${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+async function importData(file) {
+  try {
+    const text = await file.text();
+    const data = JSON.parse(text);
+    const imported = data.list;
+    if (!Array.isArray(imported)) throw new Error('格式错误');
+
+    const current = await getList();
+    const existingUrls = new Set(current.map(i => i.url));
+    const newItems = imported.filter(i => i.url && !existingUrls.has(i.url));
+    const merged = [...newItems, ...current];
+    await setList(merged);
+    renderList(merged);
+    alert(`导入成功！新增 ${newItems.length} 项${newItems.length !== imported.length ? `，跳过 ${imported.length - newItems.length} 项重复` : ''}`);
+  } catch (e) {
+    alert('导入失败：文件格式不正确');
+  }
+}
+
 async function init() {
   const list = await getList();
   renderList(list);
 
   elements.addBtn.addEventListener('click', addCurrentTab);
   elements.clearBtn.addEventListener('click', clearAll);
+  elements.exportBtn.addEventListener('click', exportData);
+  elements.importBtn.addEventListener('click', () => elements.importFileInput.click());
+  elements.importFileInput.addEventListener('change', (e) => {
+    if (e.target.files[0]) {
+      importData(e.target.files[0]);
+      e.target.value = '';
+    }
+  });
 
   chrome.storage.onChanged.addListener((changes) => {
     if (changes[STORAGE_KEY]) {

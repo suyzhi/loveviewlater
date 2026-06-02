@@ -19,9 +19,16 @@
     </div>
     <ul id="list" class="list"></ul>
     <footer id="footer" class="footer hidden">
-      <button id="clearBtn" class="btn-danger">清空全部</button>
-      <span id="count" class="count"></span>
+      <div class="footer-left">
+        <button id="exportBtn" class="btn-outline" title="导出数据备份">导出</button>
+        <button id="importBtn" class="btn-outline" title="导入数据恢复">导入</button>
+      </div>
+      <div class="footer-right">
+        <span id="count" class="count"></span>
+        <button id="clearBtn" class="btn-danger">清空全部</button>
+      </div>
     </footer>
+    <input type="file" id="importFileInput" accept=".json" class="hidden">
   </div>
   <script src="panel.js"></script>
 </body>
