@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>稍后再看</title>
+  <link rel="stylesheet" href="panel.css">
+</head>
+<body>
+  <div id="app">
+    <header class="header">
+      <h1 class="title">稍后再看</h1>
+      <button id="addBtn" class="btn-primary" title="添加当前页面">+ 添加当前页</button>
+    </header>
+    <div id="emptyState" class="empty-state hidden">
+      <div class="empty-icon">📖</div>
+      <p class="empty-text">暂无内容</p>
+      <p class="empty-hint">点击上方按钮或右键菜单添加网页</p>
+    </div>
+    <ul id="list" class="list"></ul>
+    <footer id="footer" class="footer hidden">
+      <button id="clearBtn" class="btn-danger">清空全部</button>
+      <span id="count" class="count"></span>
+    </footer>
+  </div>
+  <script src="panel.js"></script>
+</body>
+</html>
