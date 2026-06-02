@@ -39,21 +39,21 @@ body {
   overflow-x: hidden;
 }
 
-@keyframes fadeIn {
-  from { opacity: 0; }
-  to { opacity: 1; }
+@keyframes slideIn {
+  from { transform: translateX(100%); opacity: 0; }
+  to { transform: translateX(0); opacity: 1; }
 }
 
-@keyframes fadeOut {
-  from { opacity: 1; }
-  to { opacity: 0; }
+@keyframes slideOut {
+  from { transform: translateX(0); opacity: 1; }
+  to { transform: translateX(100%); opacity: 0; }
 }
 
 #app {
   display: flex;
   flex-direction: column;
   min-height: 100vh;
-  animation: fadeIn 0.25s ease;
+  animation: slideIn 0.25s ease;
 }
 
 .header {
@@ -148,8 +148,8 @@ body {
   color: var(--text-secondary);
 }
 
-.fade-out {
-  animation: fadeOut 0.25s ease forwards;
+.slide-out {
+  animation: slideOut 0.25s ease forwards;
 }
 
 .hidden {
@@ -247,4 +247,39 @@ body {
 .count {
   font-size: 12px;
   color: var(--text-secondary);
+}
+
+.backup-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--bg);
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.backup-dir-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.btn-link {
+  background: none;
+  border: none;
+  color: var(--primary);
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: 4px;
+  flex-shrink: 0;
+}
+
+.btn-link:hover {
+  background: rgba(66, 133, 244, 0.1);
+  text-decoration: underline;
 }

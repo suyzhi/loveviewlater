@@ -11,7 +11,37 @@ const elements = {
   exportBtn: document.getElementById('exportBtn'),
   importBtn: document.getElementById('importBtn'),
   importFileInput: document.getElementById('importFileInput'),
+  backupDirBtn: document.getElementById('backupDirBtn'),
+  backupDirLabel: document.getElementById('backupDirLabel'),
 };
+
+let backupDirHandle = null;
+
+function openDB() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open('ReadLaterBackup', 1);
+    req.onupgradeneeded = () => req.result.createObjectStore('handles');
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function saveHandle(handle) {
+  const db = await openDB();
+  const tx = db.transaction('handles', 'readwrite');
+  tx.objectStore('handles').put(handle, 'backupDir');
+  await new Promise(r => { tx.oncomplete = r; });
+}
+
+async function loadHandle() {
+  const db = await openDB();
+  const tx = db.transaction('handles', 'readonly');
+  const req = tx.objectStore('handles').get('backupDir');
+  return new Promise((resolve) => {
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => resolve(null);
+  });
+}
 
 async function getList() {
   const result = await chrome.storage.local.get({ [STORAGE_KEY]: [] });
@@ -99,26 +129,17 @@ async function deleteItem(id) {
 
 async function renderList(list) {
   const isEmpty = list.length === 0;
-
   elements.list.innerHTML = '';
   elements.emptyState.classList.toggle('hidden', !isEmpty);
   elements.footer.classList.toggle('hidden', isEmpty);
-
   if (isEmpty) return;
-
-  list.forEach(item => {
-    elements.list.appendChild(renderItem(item));
-  });
-
+  list.forEach(item => elements.list.appendChild(renderItem(item)));
   elements.count.textContent = `共 ${list.length} 项`;
 }
 
 async function addCurrentTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab || !tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('edge://')) {
-    return;
-  }
-
+  if (!tab || !tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('edge://')) return;
   const item = {
     id: Date.now().toString(),
     title: tab.title || tab.url,
@@ -126,11 +147,8 @@ async function addCurrentTab() {
     favicon: tab.favIconUrl || `https://www.google.com/s2/favicons?domain=${new URL(tab.url).hostname}&sz=32`,
     addedAt: Date.now(),
   };
-
   const list = await getList();
-  const exists = list.some(i => i.url === item.url);
-  if (exists) return;
-
+  if (list.some(i => i.url === item.url)) return;
   list.unshift(item);
   await setList(list);
   renderList(list);
@@ -145,48 +163,107 @@ async function clearAll() {
   autoBackup();
 }
 
+async function writeToCustomDir(blob) {
+  if (!backupDirHandle) return;
+  try {
+    const fileHandle = await backupDirHandle.getFileHandle(BACKUP_FILENAME, { create: true });
+    const writable = await fileHandle.createWritable();
+    await writable.write(blob);
+    await writable.close();
+  } catch (e) {
+    backupDirHandle = null;
+    updateBackupLabel();
+  }
+}
+
+async function readFromCustomDir() {
+  if (!backupDirHandle) return null;
+  try {
+    const fileHandle = await backupDirHandle.getFileHandle(BACKUP_FILENAME);
+    const file = await fileHandle.getFile();
+    return await file.text();
+  } catch {
+    return null;
+  }
+}
+
 async function autoBackup() {
   const list = await getList();
-  const blob = new Blob([JSON.stringify({ version: 1, exportedAt: Date.now(), list }, null, 2)], { type: 'application/json' });
+  const data = JSON.stringify({ version: 1, exportedAt: Date.now(), list }, null, 2);
+  const blob = new Blob([data], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
+
+  // always backup to Downloads
   try {
-    await chrome.downloads.download({
-      url,
-      filename: BACKUP_FILENAME,
-      saveAs: false,
-      conflictAction: 'overwrite',
-    });
-  } catch (e) {
-    // silent fail for backup
-  }
+    await chrome.downloads.download({ url, filename: BACKUP_FILENAME, saveAs: false, conflictAction: 'overwrite' });
+  } catch {}
+
+  // also backup to custom directory if set
+  await writeToCustomDir(blob);
   URL.revokeObjectURL(url);
 }
 
 async function autoRestore() {
-  const items = await chrome.downloads.search({ filename: BACKUP_FILENAME, orderBy: ['-startTime'], limit: 1 });
-  if (items.length === 0) return;
-  const item = items[0];
-  if (!item.url) return;
+  // try custom directory first
+  if (backupDirHandle) {
+    const text = await readFromCustomDir();
+    if (text) {
+      const data = JSON.parse(text);
+      if (Array.isArray(data.list) && data.list.length > 0) {
+        const list = await getList();
+        if (list.length === 0) {
+          await setList(data.list);
+          return true;
+        }
+      }
+    }
+  }
+
+  // fallback to Downloads backup
   try {
-    const resp = await fetch(item.url);
+    const items = await chrome.downloads.search({ filename: BACKUP_FILENAME, orderBy: ['-startTime'], limit: 1 });
+    if (items.length === 0) return false;
+    const resp = await fetch(items[0].url);
     const data = await resp.json();
-    const imported = data.list;
-    if (!Array.isArray(imported) || imported.length === 0) return;
-    const list = await getList();
-    if (list.length > 0) return;
-    await setList(imported);
-    renderList(imported);
+    if (Array.isArray(data.list) && data.list.length > 0) {
+      const list = await getList();
+      if (list.length === 0) {
+        await setList(data.list);
+        return true;
+      }
+    }
+  } catch {}
+  return false;
+}
+
+async function pickBackupDir() {
+  try {
+    const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
+    backupDirHandle = handle;
+    await saveHandle(handle);
+    updateBackupLabel();
+    // immediately save a backup
+    autoBackup();
   } catch (e) {
-    // restore failed silently
+    if (e.name !== 'AbortError') {
+      alert('选择备份目录失败：' + e.message);
+    }
+  }
+}
+
+function updateBackupLabel() {
+  if (backupDirHandle && backupDirHandle.name) {
+    elements.backupDirLabel.textContent = backupDirHandle.name;
+    elements.backupDirLabel.title = backupDirHandle.name;
+  } else {
+    elements.backupDirLabel.textContent = '未设置（自动备份到下载文件夹）';
+    elements.backupDirLabel.title = '';
   }
 }
 
 async function exportData() {
   const list = await getList();
-  if (list.length === 0) {
-    alert('列表为空，无需导出');
-    return;
-  }
+  if (list.length === 0) { alert('列表为空，无需导出'); return; }
   const blob = new Blob([JSON.stringify({ version: 1, exportedAt: Date.now(), list }, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -201,8 +278,7 @@ async function importData(file) {
     const text = await file.text();
     const data = JSON.parse(text);
     const imported = data.list;
-    if (!Array.isArray(imported)) throw new Error('格式错误');
-
+    if (!Array.isArray(imported)) throw new Error();
     const current = await getList();
     const existingUrls = new Set(current.map(i => i.url));
     const newItems = imported.filter(i => i.url && !existingUrls.has(i.url));
@@ -211,16 +287,21 @@ async function importData(file) {
     renderList(merged);
     autoBackup();
     alert(`导入成功！新增 ${newItems.length} 项${newItems.length !== imported.length ? `，跳过 ${imported.length - newItems.length} 项重复` : ''}`);
-  } catch (e) {
+  } catch {
     alert('导入失败：文件格式不正确');
   }
 }
 
 async function init() {
+  // restore backup directory handle
+  backupDirHandle = await loadHandle();
+  updateBackupLabel();
+
+  // try auto-restore if list is empty
   let list = await getList();
   if (list.length === 0) {
-    await autoRestore();
-    list = await getList();
+    const restored = await autoRestore();
+    if (restored) list = await getList();
   }
   renderList(list);
 
@@ -228,21 +309,13 @@ async function init() {
   elements.clearBtn.addEventListener('click', clearAll);
   elements.exportBtn.addEventListener('click', exportData);
   elements.importBtn.addEventListener('click', () => elements.importFileInput.click());
+  elements.backupDirBtn.addEventListener('click', pickBackupDir);
   elements.importFileInput.addEventListener('change', (e) => {
-    if (e.target.files[0]) {
-      importData(e.target.files[0]);
-      e.target.value = '';
-    }
+    if (e.target.files[0]) { importData(e.target.files[0]); e.target.value = ''; }
   });
 
   chrome.storage.onChanged.addListener((changes) => {
-    if (changes[STORAGE_KEY]) {
-      renderList(changes[STORAGE_KEY].newValue || []);
-    }
-  });
-
-  window.addEventListener('pagehide', () => {
-    document.getElementById('app').classList.add('fade-out');
+    if (changes[STORAGE_KEY]) renderList(changes[STORAGE_KEY].newValue || []);
   });
 }
 
