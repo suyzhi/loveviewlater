@@ -12,7 +12,8 @@
     "storage",
     "contextMenus",
     "sidePanel",
-    "tabs"
+    "tabs",
+    "downloads"
   ],
   "host_permissions": [
     "<all_urls>"

@@ -1,4 +1,5 @@
 const STORAGE_KEY = 'readLaterList';
+const BACKUP_FILENAME = '稍后再看自动备份.json';
 
 const elements = {
   list: document.getElementById('list'),
@@ -93,6 +94,7 @@ async function deleteItem(id) {
   const filtered = list.filter(item => item.id !== id);
   await setList(filtered);
   renderList(filtered);
+  autoBackup();
 }
 
 async function renderList(list) {
@@ -132,6 +134,7 @@ async function addCurrentTab() {
   list.unshift(item);
   await setList(list);
   renderList(list);
+  autoBackup();
 }
 
 async function clearAll() {
@@ -139,6 +142,43 @@ async function clearAll() {
   if (!confirm('确定清空全部稍后再看列表？')) return;
   await setList([]);
   renderList([]);
+  autoBackup();
+}
+
+async function autoBackup() {
+  const list = await getList();
+  const blob = new Blob([JSON.stringify({ version: 1, exportedAt: Date.now(), list }, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  try {
+    await chrome.downloads.download({
+      url,
+      filename: BACKUP_FILENAME,
+      saveAs: false,
+      conflictAction: 'overwrite',
+    });
+  } catch (e) {
+    // silent fail for backup
+  }
+  URL.revokeObjectURL(url);
+}
+
+async function autoRestore() {
+  const items = await chrome.downloads.search({ filename: BACKUP_FILENAME, orderBy: ['-startTime'], limit: 1 });
+  if (items.length === 0) return;
+  const item = items[0];
+  if (!item.url) return;
+  try {
+    const resp = await fetch(item.url);
+    const data = await resp.json();
+    const imported = data.list;
+    if (!Array.isArray(imported) || imported.length === 0) return;
+    const list = await getList();
+    if (list.length > 0) return;
+    await setList(imported);
+    renderList(imported);
+  } catch (e) {
+    // restore failed silently
+  }
 }
 
 async function exportData() {
@@ -169,6 +209,7 @@ async function importData(file) {
     const merged = [...newItems, ...current];
     await setList(merged);
     renderList(merged);
+    autoBackup();
     alert(`导入成功！新增 ${newItems.length} 项${newItems.length !== imported.length ? `，跳过 ${imported.length - newItems.length} 项重复` : ''}`);
   } catch (e) {
     alert('导入失败：文件格式不正确');
@@ -176,7 +217,11 @@ async function importData(file) {
 }
 
 async function init() {
-  const list = await getList();
+  let list = await getList();
+  if (list.length === 0) {
+    await autoRestore();
+    list = await getList();
+  }
   renderList(list);
 
   elements.addBtn.addEventListener('click', addCurrentTab);
