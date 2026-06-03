@@ -61,23 +61,26 @@ document.addEventListener(
 );
 
 function extractPostLink(container) {
+  // 从容器提取帖子正文作为标题
+  const postText = extractPostText(container);
+
   // 1. 包含 <time> 的链接（X 帖子永久链接）
   const byTime = container.querySelector('a time, a[datetime]');
   if (byTime) {
     const a = byTime.closest('a');
-    if (a?.href) return { url: a.href, title: container.querySelector('[data-testid="tweetText"]')?.textContent?.trim() || a.textContent?.trim() };
+    if (a?.href) return { url: a.href, title: postText || a.textContent?.trim() };
   }
 
-  const all = [...container.querySelectorAll('a[href]')].filter(a => !a.href.startsWith('javascript:'));
+  const all = [...container.querySelectorAll('a[href]')].filter((a) => !a.href.startsWith('javascript:'));
 
-  // 2. 包含 /status/ /post/ /comments/ 模式
+  // 2. 包含 /status/ /post/ /comments/ 模式的链接
   for (const a of all) {
     if (a.href.includes('/status/') || a.href.includes('/post/') || a.href.includes('/comments/')) {
-      return { url: a.href, title: a.textContent?.trim() };
+      return { url: a.href, title: postText || a.textContent?.trim() };
     }
   }
 
-  // 3. 文本最长的链接（通常是标题/正文）
+  // 3. 文本最长的链接
   let best = null;
   let bestLen = 0;
   for (const a of all) {
@@ -87,10 +90,37 @@ function extractPostLink(container) {
       bestLen = t.length;
     }
   }
-  if (best) return { url: best.href, title: best.textContent?.trim() };
+  if (best) return { url: best.href, title: postText || best.textContent?.trim() };
 
   // 4. 任意链接兜底
-  if (all[0]) return { url: all[0].href, title: all[0].textContent?.trim() };
+  if (all[0]) return { url: all[0].href, title: postText || all[0].textContent?.trim() };
 
   return null;
+}
+
+function extractPostText(container) {
+  // 尝试多种选择器提取帖子正文
+  const selectors = [
+    '[data-testid="tweetText"]',
+    '[data-testid="postText"]',
+    '.tweet-text',
+    '.post-content',
+    '[itemprop="articleBody"]',
+    'p:not(:empty)',
+  ];
+  for (const sel of selectors) {
+    const el = container.querySelector(sel);
+    if (el) {
+      const text = el.textContent?.trim();
+      if (text && text.length > 5) return text;
+    }
+  }
+  // 兜底：取容器内最长的文本段落
+  const paragraphs = container.querySelectorAll('p, span, div[dir="auto"]');
+  let best = '';
+  for (const p of paragraphs) {
+    const t = (p.textContent || '').trim();
+    if (t.length > best.length) best = t;
+  }
+  return best.length > 5 ? best : '';
 }
