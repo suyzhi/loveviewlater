@@ -18,12 +18,8 @@ async function getList() {
   return result[STORAGE_KEY];
 }
 
-let _localUpdate = false;
-
 async function setList(list) {
-  _localUpdate = true;
   await chrome.storage.local.set({ [STORAGE_KEY]: list });
-  _localUpdate = false;
 }
 
 function formatTime(ts) {
@@ -312,11 +308,8 @@ async function init() {
     if (msg.type === 'closePanel') {
       window.close();
     }
-  });
-
-  chrome.storage.onChanged.addListener((changes) => {
-    if (changes[STORAGE_KEY] && !_localUpdate) {
-      renderList(changes[STORAGE_KEY].newValue || []);
+    if (msg.type === 'listUpdated') {
+      getList().then(renderList);
     }
   });
 

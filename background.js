@@ -126,6 +126,9 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
     const list = result.readLaterList;
     if (list.some((i) => i.url === item.url)) return;
     list.unshift(item);
-    chrome.storage.local.set({ readLaterList: list });
+    chrome.storage.local.set({ readLaterList: list }, () => {
+      // 通知侧边栏刷新
+      chrome.runtime.sendMessage({ type: 'listUpdated' }).catch(() => {});
+    });
   });
 });
