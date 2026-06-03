@@ -1,5 +1,5 @@
 // 捕获右键点击的帖子 URL，通过消息发送给 background
-// 标题用帖子的完整原文
+// 标题用帖子完整原文
 
 document.addEventListener(
   'contextmenu',
@@ -33,7 +33,6 @@ document.addEventListener(
     if (!result) {
       const nearby = e.target.closest('a[href]');
       if (nearby && nearby.href && !nearby.href.startsWith('javascript:')) {
-        // 看看它是否在文章容器里
         const art = nearby.closest('article, [role="article"]');
         result = {
           url: nearby.href,
@@ -54,35 +53,45 @@ document.addEventListener(
       }
       if (best) {
         const link = findPostUrl(best);
-        if (link) result = { url: link, title: extractFullText(best) };
+        if (link) { result = { url: link, title: extractFullText(best) }; }
       }
     }
 
     if (result) {
+      // 视觉反馈：把找到的容器边框闪一下绿色
+      if (result.url && !result.url.includes('x.com') && !result.url.includes('twitter.com/home')) {
+        const art = document.querySelector('article, [role="article"]');
+        if (art) {
+          art.style.outline = '3px solid #00ff00';
+          art.style.outlineOffset = '-3px';
+          setTimeout(() => { art.style.outline = ''; }, 1000);
+        }
+      }
+
+      // 同时发送消息和存 storage 双重保险
       chrome.runtime.sendMessage({ type: 'contextUrl', url: result.url, title: result.title || result.url });
+      chrome.storage.local.set({ _pendingContext: { url: result.url, title: result.title || result.url } });
+    } else {
+      // 没找到：闪红色
+      document.body.style.outline = '3px solid #ff0000';
+      setTimeout(() => { document.body.style.outline = ''; }, 500);
     }
   },
   { capture: true }
 );
 
 function findPostUrl(container) {
-  // 1. 包含 <time> 的链接（X 帖子永久链接）
   const byTime = container.querySelector('a time, a[datetime]');
   if (byTime) {
     const a = byTime.closest('a');
     if (a?.href) return a.href;
   }
-
   const all = [...container.querySelectorAll('a[href]')].filter((a) => !a.href.startsWith('javascript:'));
-
-  // 2. 含帖子 URL 模式
   for (const a of all) {
     if (a.href.includes('/status/') || a.href.includes('/post/') || a.href.includes('/comments/')) {
       return a.href;
     }
   }
-
-  // 3. 文本最长的链接
   let best = null;
   let bestLen = 0;
   for (const a of all) {
@@ -93,21 +102,14 @@ function findPostUrl(container) {
     }
   }
   if (best) return best.href;
-
-  // 4. 任意链接
   return all[0]?.href || null;
 }
 
 function extractFullText(container) {
-  // X/Twitter
   const tweetText = container.querySelector('[data-testid="tweetText"]');
   if (tweetText) return tweetText.textContent?.trim() || '';
-
-  // Reddit / 通用
   const postContent = container.querySelector('[data-testid="postText"], .post-content, [itemprop="articleBody"], .entry-content');
   if (postContent) return postContent.textContent?.trim() || '';
-
-  // 兜底：收集所有非空段落
   const parts = [];
   for (const p of container.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, [dir="auto"]')) {
     const t = (p.textContent || '').trim();
