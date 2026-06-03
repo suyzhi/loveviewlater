@@ -116,31 +116,40 @@ async function toggleStrikethrough(id) {
   const item = list.find(i => i.id === id);
   if (!item) return;
 
-  const li = document.querySelector(`.list-item[data-id="${id}"]`);
+  const oldLi = document.querySelector(`.list-item[data-id="${id}"]`);
+  if (!oldLi) return;
 
-  if (item.strikethrough) {
-    // 取消删除线
-    if (li) {
-      li.classList.remove('strikethrough');
-      li.classList.add('strikethrough-reverse');
-      const spans = li.querySelectorAll('.list-item-title > span');
-      if (spans.length > 0) {
-        spans.forEach((span, i) => {
-          span.style.animation = `strikeLineOut 0.35s ease-out ${(i * 0.1).toFixed(2)}s forwards`;
-        });
-      }
+  item.strikethrough = !item.strikethrough;
+  await setList(list);
+
+  if (!item.strikethrough) {
+    // 取消删除线：先播反向动画，再替换元素
+    if (oldLi) {
+      oldLi.classList.remove('strikethrough');
+      oldLi.classList.add('strikethrough-reverse');
+      const spans = oldLi.querySelectorAll('.list-item-title > span');
+      spans.forEach((span, i) => {
+        span.style.animation = `strikeLineOut 0.35s ease-out ${(i * 0.1).toFixed(2)}s forwards`;
+      });
+      // 单行无 span 的情况，CSS 的 :not(:has(> span)) 会处理
     }
-    setTimeout(async () => {
-      item.strikethrough = false;
-      await setList(list);
-      renderList(list);
+    setTimeout(() => {
+      const newLi = renderItem(item);
+      oldLi.parentNode?.replaceChild(newLi, oldLi);
+      updateCount();
     }, 450);
   } else {
-    // 添加删除线
-    item.strikethrough = true;
-    await setList(list);
-    renderList(list);
+    // 添加删除线：替换为新元素，动画自然触发
+    const newLi = renderItem(item);
+    oldLi.parentNode?.replaceChild(newLi, oldLi);
+    requestAnimationFrame(splitStrikethroughLines);
+    updateCount();
   }
+}
+
+function updateCount() {
+  const n = document.querySelectorAll('.list-item').length;
+  document.getElementById('count').textContent = `共 ${n} 项`;
 }
 
 function openItem(item) {
@@ -151,7 +160,16 @@ async function deleteItem(id) {
   const list = await getList();
   const filtered = list.filter(item => item.id !== id);
   await setList(filtered);
-  renderList(filtered);
+  // 直接移除 DOM 节点，避免全量重绘触发动画重播
+  const li = document.querySelector(`.list-item[data-id="${id}"]`);
+  li?.remove();
+  // 如果列表空了，更新空状态
+  if (filtered.length === 0) {
+    elements.list.innerHTML = '';
+    elements.emptyState.classList.remove('hidden');
+    elements.footer.classList.add('hidden');
+  }
+  updateCount();
 }
 
 async function renderList(list) {
@@ -223,7 +241,11 @@ async function addCurrentTab() {
   if (list.some(i => i.url === item.url)) return;
   list.unshift(item);
   await setList(list);
-  renderList(list);
+  // 只追加新元素，不重绘全部
+  elements.emptyState.classList.add('hidden');
+  elements.footer.classList.remove('hidden');
+  elements.list.prepend(renderItem(item));
+  updateCount();
 }
 
 async function clearAll() {
