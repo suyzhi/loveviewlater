@@ -237,8 +237,8 @@ body {
 }
 
 @keyframes strikeLineReveal {
-  from { clip-path: inset(0 100% 0 0); }
-  to { clip-path: inset(0 0 0 0); }
+  from { clip-path: inset(0 0 0 0); }
+  to { clip-path: inset(0 100% 0 0); }
 }
 
 /* 反向遮罩：从右到左覆盖 */
@@ -253,8 +253,8 @@ body {
 }
 
 @keyframes strikeLineHide {
-  from { clip-path: inset(0 0 0 0); }
-  to { clip-path: inset(0 100% 0 0); }
+  from { clip-path: inset(0 100% 0 0); }
+  to { clip-path: inset(0 0 0 0); }
 }
 
 .list-item.strikethrough-reverse .list-item-title {
