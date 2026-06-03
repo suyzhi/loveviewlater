@@ -59,14 +59,9 @@ function injectScrollTracker(tabId) {
 
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({
-    id: 'addPageToReadLater',
+    id: 'addToReadLater',
     title: '添加到稍后再看',
-    contexts: ['page'],
-  });
-  chrome.contextMenus.create({
-    id: 'addLinkToReadLater',
-    title: '链接添加到稍后再看',
-    contexts: ['link'],
+    contexts: ['page', 'link', 'image', 'video', 'audio', 'selection'],
   });
 });
 
@@ -82,10 +77,25 @@ chrome.action.onClicked.addListener((tab) => {
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   let url, title;
 
-  if (info.menuItemId === 'addLinkToReadLater' && info.linkUrl) {
+  if (info.linkUrl) {
+    // 右键的是链接
     url = info.linkUrl;
-    title = info.selectionText || url;
-  } else if (info.menuItemId === 'addPageToReadLater' && tab) {
+    title = info.selectionText || info.linkUrl;
+  } else if (info.srcUrl) {
+    // 右键的是图片/视频/音频
+    url = info.srcUrl;
+    try {
+      const name = new URL(url).pathname.split('/').pop() || url;
+      title = decodeURIComponent(name);
+    } catch {
+      title = url;
+    }
+  } else if (info.selectionText) {
+    // 选中的文字
+    url = tab?.url || info.pageUrl;
+    title = info.selectionText;
+  } else if (tab) {
+    // 页面空白处
     url = tab.url;
     title = tab.title || url;
   }
