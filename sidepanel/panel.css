@@ -220,43 +220,47 @@ body {
 }
 
 .list-item.strikethrough .list-item-title {
-  background-image: linear-gradient(
-    to bottom,
-    transparent calc(50% - 0.5px),
-    var(--text) calc(50% - 0.5px),
-    var(--text) calc(50% + 0.5px),
-    transparent calc(50% + 0.5px)
-  );
-  background-size: 0% 1.4em;
-  background-repeat: repeat-y;
-  background-position: left top;
+  position: relative;
+  text-decoration: line-through;
   opacity: 0.5;
-  animation: strikeSlideBg 0.35s ease-out forwards;
 }
 
-@keyframes strikeSlideBg {
-  from { background-size: 0% 1.4em; }
-  to { background-size: 100% 1.4em; }
+/* 每行遮罩：从左到右滑开，逐行延时 */
+.strike-line {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  background: var(--bg);
+  pointer-events: none;
+  z-index: 1;
+  animation: strikeLineReveal 0.3s ease-out forwards;
+}
+
+@keyframes strikeLineReveal {
+  from { clip-path: inset(0 100% 0 0); }
+  to { clip-path: inset(0 0 0 0); }
+}
+
+/* 反向遮罩：从右到左覆盖 */
+.strike-line-reverse {
+  position: absolute;
+  left: 0;
+  width: 100%;
+  background: var(--bg);
+  pointer-events: none;
+  z-index: 1;
+  animation: strikeLineHide 0.3s ease-out forwards;
+}
+
+@keyframes strikeLineHide {
+  from { clip-path: inset(0 0 0 0); }
+  to { clip-path: inset(0 100% 0 0); }
 }
 
 .list-item.strikethrough-reverse .list-item-title {
-  background-image: linear-gradient(
-    to bottom,
-    transparent calc(50% - 0.5px),
-    var(--text) calc(50% - 0.5px),
-    var(--text) calc(50% + 0.5px),
-    transparent calc(50% + 0.5px)
-  );
-  background-size: 100% 1.4em;
-  background-repeat: repeat-y;
-  background-position: left top;
+  position: relative;
+  text-decoration: line-through;
   opacity: 0.5;
-  animation: strikeSlideBgReverse 0.35s ease-out forwards;
-}
-
-@keyframes strikeSlideBgReverse {
-  from { background-size: 100% 1.4em; }
-  to { background-size: 0% 1.4em; }
 }
 
 .list-item.strikethrough .list-item-domain {
