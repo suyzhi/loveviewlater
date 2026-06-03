@@ -118,37 +118,16 @@ async function toggleStrikethrough(id) {
   const li = document.querySelector(`.list-item[data-id="${id}"]`);
 
   if (item.strikethrough) {
-    // 取消删除线：先加反向遮罩（从右到左覆盖），再更新数据
+    // 取消删除线：先播反向动画，再更新数据
     if (li) {
       li.classList.remove('strikethrough');
       li.classList.add('strikethrough-reverse');
-      // 为多行添加反向遮罩
-      const titleEl = li.querySelector('.list-item-title');
-      if (titleEl) {
-        const lineHeight = parseFloat(getComputedStyle(titleEl).lineHeight);
-        if (lineHeight) {
-          const numLines = Math.round(titleEl.offsetHeight / lineHeight);
-          for (let i = 0; i < numLines; i++) {
-            const overlay = document.createElement('div');
-            overlay.className = 'strike-line-reverse';
-            overlay.style.cssText = `
-              position: absolute; left: 0;
-              top: ${i * lineHeight}px;
-              width: 100%; height: ${lineHeight}px;
-              background: var(--bg);
-              pointer-events: none; z-index: 1;
-              animation: strikeLineHide 0.3s ease-out ${(i * 0.1).toFixed(2)}s forwards;
-            `;
-            titleEl.appendChild(overlay);
-          }
-        }
-      }
     }
     setTimeout(async () => {
       item.strikethrough = false;
       await setList(list);
       renderList(list);
-    }, 350 + (document.querySelectorAll('.strike-line-reverse').length * 100));
+    }, 350);
   } else {
     // 添加删除线
     item.strikethrough = true;
@@ -176,29 +155,6 @@ async function renderList(list) {
   if (isEmpty) return;
   list.forEach(item => elements.list.appendChild(renderItem(item)));
   elements.count.textContent = `共 ${list.length} 项`;
-  // 为多行标题添加逐行动画遮罩
-  requestAnimationFrame(addStrikeOverlays);
-}
-
-function addStrikeOverlays() {
-  document.querySelectorAll('.list-item.strikethrough .list-item-title').forEach(el => {
-    if (el.querySelector('.strike-line')) return; // 已处理
-    const style = getComputedStyle(el);
-    const lineHeight = parseFloat(style.lineHeight);
-    if (!lineHeight) return;
-    const numLines = Math.round(el.offsetHeight / lineHeight);
-    if (numLines <= 1) return;
-    for (let i = 0; i < numLines; i++) {
-      const overlay = document.createElement('div');
-      overlay.className = 'strike-line';
-      overlay.style.cssText = `
-        top: ${i * lineHeight}px;
-        height: ${lineHeight}px;
-        animation-delay: ${(i * 0.1).toFixed(2)}s;
-      `;
-      el.appendChild(overlay);
-    }
-  });
 }
 
 async function addCurrentTab() {
