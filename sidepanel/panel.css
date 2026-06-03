@@ -163,7 +163,7 @@ body {
 
 .list-item {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 10px;
   padding: 10px 16px;
   border-bottom: 1px solid var(--border);
@@ -190,9 +190,8 @@ body {
 .list-item-title {
   font-size: 13px;
   font-weight: 500;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  word-break: break-word;
+  line-height: 1.4;
 }
 
 .list-item-domain {
@@ -218,6 +217,58 @@ body {
 
 .list-item:hover .list-item-delete {
   opacity: 1;
+}
+
+.list-item.strikethrough .list-item-title {
+  position: relative;
+  display: inline-block;
+  opacity: 0.5;
+}
+
+.list-item.strikethrough .list-item-title::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 100%;
+  height: 1px;
+  background: var(--text);
+  animation: strikeSlide 0.35s ease-out forwards;
+}
+
+@keyframes strikeSlide {
+  from { width: 0; }
+  to { width: 100%; }
+}
+
+.list-item.strikethrough-reverse .list-item-title {
+  position: relative;
+  display: inline-block;
+  opacity: 0.5;
+}
+
+.list-item.strikethrough-reverse .list-item-title::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 100%;
+  height: 1px;
+  background: var(--text);
+  animation: strikeSlideReverse 0.35s ease-out forwards;
+}
+
+@keyframes strikeSlideReverse {
+  from { width: 100%; }
+  to { width: 0; }
+}
+
+.list-item.strikethrough .list-item-domain {
+  opacity: 0.4;
+}
+
+.list-item.strikethrough .scroll-progress {
+  opacity: 0.3;
 }
 
 .list-item-delete:hover {
@@ -282,4 +333,31 @@ body {
 .btn-link:hover {
   background: rgba(66, 133, 244, 0.1);
   text-decoration: underline;
+}
+
+/* 浏览进度条 */
+.scroll-progress {
+  margin-top: 4px;
+  height: 3px;
+  background: var(--border);
+  border-radius: 2px;
+  overflow: hidden;
+  max-width: 80px;
+}
+
+.scroll-progress-bar {
+  height: 100%;
+  background: var(--primary);
+  border-radius: 2px;
+  transition: width 0.3s ease;
+}
+
+.scroll-progress-bar.complete {
+  background: #34a853;
+}
+
+@media (prefers-color-scheme: dark) {
+  .scroll-progress-bar.complete {
+    background: #2ecc71;
+  }
 }

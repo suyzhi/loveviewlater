@@ -13,35 +13,8 @@ const elements = {
   importFileInput: document.getElementById('importFileInput'),
   backupDirBtn: document.getElementById('backupDirBtn'),
   backupDirLabel: document.getElementById('backupDirLabel'),
+  reloadBtn: document.getElementById('reloadBtn'),
 };
-
-let backupDirHandle = null;
-
-function openDB() {
-  return new Promise((resolve, reject) => {
-    const req = indexedDB.open('ReadLaterBackup', 1);
-    req.onupgradeneeded = () => req.result.createObjectStore('handles');
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
-  });
-}
-
-async function saveHandle(handle) {
-  const db = await openDB();
-  const tx = db.transaction('handles', 'readwrite');
-  tx.objectStore('handles').put(handle, 'backupDir');
-  await new Promise(r => { tx.oncomplete = r; });
-}
-
-async function loadHandle() {
-  const db = await openDB();
-  const tx = db.transaction('handles', 'readonly');
-  const req = tx.objectStore('handles').get('backupDir');
-  return new Promise((resolve) => {
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => resolve(null);
-  });
-}
 
 async function getList() {
   const result = await chrome.storage.local.get({ [STORAGE_KEY]: [] });
@@ -76,6 +49,7 @@ function getDomain(url) {
 function renderItem(item) {
   const li = document.createElement('li');
   li.className = 'list-item';
+  if (item.strikethrough) li.classList.add('strikethrough');
   li.dataset.id = item.id;
 
   const favicon = document.createElement('img');
@@ -92,18 +66,42 @@ function renderItem(item) {
 
   const domainEl = document.createElement('div');
   domainEl.className = 'list-item-domain';
-  domainEl.textContent = `${getDomain(item.url)} · ${formatTime(item.addedAt)}`;
+  let domainText = `${getDomain(item.url)} · ${formatTime(item.addedAt)}`;
+  if (item.scrollPercent !== undefined && item.scrollPercent > 0) {
+    domainText += ` · ${item.scrollPercent}%`;
+  }
+  domainEl.textContent = domainText;
 
   content.appendChild(titleEl);
   content.appendChild(domainEl);
 
+  // 浏览进度条
+  if (item.scrollPercent !== undefined && item.scrollPercent > 0) {
+    const progressContainer = document.createElement('div');
+    progressContainer.className = 'scroll-progress';
+    const progressBar = document.createElement('div');
+    progressBar.className = 'scroll-progress-bar';
+    const pct = Math.min(100, item.scrollPercent);
+    progressBar.style.width = pct + '%';
+    if (pct >= 100) progressBar.classList.add('complete');
+    progressContainer.appendChild(progressBar);
+    content.appendChild(progressContainer);
+  }
+
   const deleteBtn = document.createElement('button');
   deleteBtn.className = 'list-item-delete';
   deleteBtn.textContent = '✕';
-  deleteBtn.title = '删除';
+  deleteBtn.title = '点击标记已读，右键永久删除';
   deleteBtn.addEventListener('click', (e) => {
     e.stopPropagation();
-    deleteItem(item.id);
+    toggleStrikethrough(item.id);
+  });
+  deleteBtn.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (confirm(`确定永久删除「${item.title}」？`)) {
+      deleteItem(item.id);
+    }
   });
 
   li.appendChild(favicon);
@@ -115,8 +113,34 @@ function renderItem(item) {
   return li;
 }
 
+async function toggleStrikethrough(id) {
+  const list = await getList();
+  const item = list.find(i => i.id === id);
+  if (!item) return;
+
+  const li = document.querySelector(`.list-item[data-id="${id}"]`);
+
+  if (item.strikethrough) {
+    // 取消删除线：先播反向动画（右→左），动画结束后再更新数据
+    if (li) {
+      li.classList.remove('strikethrough');
+      li.classList.add('strikethrough-reverse');
+    }
+    setTimeout(async () => {
+      item.strikethrough = false;
+      await setList(list);
+      renderList(list);
+    }, 350);
+  } else {
+    // 添加删除线：立即更新数据，重新渲染触发正向动画（左→右）
+    item.strikethrough = true;
+    await setList(list);
+    renderList(list);
+  }
+}
+
 function openItem(item) {
-  chrome.tabs.create({ url: item.url, active: false });
+  chrome.runtime.sendMessage({ type: 'openItem', url: item.url, itemId: item.id });
 }
 
 async function deleteItem(id) {
@@ -124,6 +148,7 @@ async function deleteItem(id) {
   const filtered = list.filter(item => item.id !== id);
   await setList(filtered);
   renderList(filtered);
+  autoBackup();
 }
 
 async function renderList(list) {
@@ -151,6 +176,7 @@ async function addCurrentTab() {
   list.unshift(item);
   await setList(list);
   renderList(list);
+  autoBackup();
 }
 
 async function clearAll() {
@@ -158,55 +184,85 @@ async function clearAll() {
   if (!confirm('确定清空全部稍后再看列表？')) return;
   await setList([]);
   renderList([]);
+  autoBackup();
 }
 
-async function writeToCustomDir(blob) {
-  if (!backupDirHandle) return;
-  try {
-    const fileHandle = await backupDirHandle.getFileHandle(BACKUP_FILENAME, { create: true });
-    const writable = await fileHandle.createWritable();
-    await writable.write(blob);
-    await writable.close();
-  } catch (e) {
-    backupDirHandle = null;
-    updateBackupLabel();
-  }
+// ---- 备份目录 ----
+// 用 chrome.storage.local 存目录名，通过 chrome.downloads.download() 子目录写入
+// 扩展 reload 后依然有效
+
+async function getBackupDirName() {
+  const result = await chrome.storage.local.get({ backupDirName: '' });
+  return result.backupDirName || '';
 }
 
-async function readFromCustomDir() {
-  if (!backupDirHandle) return null;
-  try {
-    const fileHandle = await backupDirHandle.getFileHandle(BACKUP_FILENAME);
-    const file = await fileHandle.getFile();
-    return await file.text();
-  } catch {
-    return null;
+async function setBackupDirName(name) {
+  await chrome.storage.local.set({ backupDirName: name });
+  await updateBackupLabel();
+  await autoBackup();
+}
+
+async function clearBackupDir() {
+  await chrome.storage.local.remove('backupDirName');
+  await updateBackupLabel();
+}
+
+async function updateBackupLabel() {
+  const name = await getBackupDirName();
+  if (name) {
+    elements.backupDirLabel.textContent = `📁 ${name}`;
+    elements.backupDirLabel.title = `备份到下载文件夹/${name}/`;
+  } else {
+    elements.backupDirLabel.textContent = '未设置（自动备份到下载文件夹）';
+    elements.backupDirLabel.title = '';
   }
 }
 
 async function autoBackup() {
   const list = await getList();
+  const dirName = await getBackupDirName();
   const data = JSON.stringify({ version: 1, exportedAt: Date.now(), list }, null, 2);
   const blob = new Blob([data], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
 
-  if (backupDirHandle) {
-    await writeToCustomDir(blob);
-  } else {
-    // default: save to Downloads
-    const url = URL.createObjectURL(blob);
+  const filename = dirName ? `${dirName}/${BACKUP_FILENAME}` : BACKUP_FILENAME;
+  try {
+    await chrome.downloads.download({
+      url,
+      filename,
+      saveAs: false,
+      conflictAction: 'overwrite',
+    });
+  } catch (e) {
+    // 如果带子目录失败（例如目录名含非法字符），回退到无子目录
     try {
-      await chrome.downloads.download({ url, filename: BACKUP_FILENAME, saveAs: false, conflictAction: 'overwrite' });
+      await chrome.downloads.download({
+        url,
+        filename: BACKUP_FILENAME,
+        saveAs: false,
+        conflictAction: 'overwrite',
+      });
     } catch {}
-    URL.revokeObjectURL(url);
   }
+  URL.revokeObjectURL(url);
 }
 
 async function autoRestore() {
-  // try custom directory first
-  if (backupDirHandle) {
-    const text = await readFromCustomDir();
-    if (text) {
-      const data = JSON.parse(text);
+  const dirName = await getBackupDirName();
+  const searchNames = dirName
+    ? [`${dirName}/${BACKUP_FILENAME}`, BACKUP_FILENAME]
+    : [BACKUP_FILENAME];
+
+  for (const name of searchNames) {
+    try {
+      const items = await chrome.downloads.search({
+        filename: name,
+        orderBy: ['-startTime'],
+        limit: 1,
+      });
+      if (items.length === 0) continue;
+      const resp = await fetch(items[0].url);
+      const data = await resp.json();
       if (Array.isArray(data.list) && data.list.length > 0) {
         const list = await getList();
         if (list.length === 0) {
@@ -214,48 +270,23 @@ async function autoRestore() {
           return true;
         }
       }
-    }
+    } catch {}
   }
-
-  // fallback to Downloads backup
-  try {
-    const items = await chrome.downloads.search({ filename: BACKUP_FILENAME, orderBy: ['-startTime'], limit: 1 });
-    if (items.length === 0) return false;
-    const resp = await fetch(items[0].url);
-    const data = await resp.json();
-    if (Array.isArray(data.list) && data.list.length > 0) {
-      const list = await getList();
-      if (list.length === 0) {
-        await setList(data.list);
-        return true;
-      }
-    }
-  } catch {}
   return false;
 }
 
 async function pickBackupDir() {
-  try {
-    const handle = await window.showDirectoryPicker({ mode: 'readwrite' });
-    backupDirHandle = handle;
-    await saveHandle(handle);
-    updateBackupLabel();
-    // immediately save a backup
-    autoBackup();
-  } catch (e) {
-    if (e.name !== 'AbortError') {
-      alert('选择备份目录失败：' + e.message);
-    }
-  }
-}
-
-function updateBackupLabel() {
-  if (backupDirHandle && backupDirHandle.name) {
-    elements.backupDirLabel.textContent = backupDirHandle.name;
-    elements.backupDirLabel.title = backupDirHandle.name;
+  const current = await getBackupDirName();
+  const name = prompt(
+    '输入备份子目录名称（将保存在浏览器的下载文件夹下）：\n留空 = 不设子目录，直接存下载文件夹',
+    current || '稍后再看备份'
+  );
+  if (name === null) return; // 取消
+  const trimmed = name.trim();
+  if (!trimmed) {
+    await clearBackupDir();
   } else {
-    elements.backupDirLabel.textContent = '未设置（自动备份到下载文件夹）';
-    elements.backupDirLabel.title = '';
+    await setBackupDirName(trimmed);
   }
 }
 
@@ -283,6 +314,7 @@ async function importData(file) {
     const merged = [...newItems, ...current];
     await setList(merged);
     renderList(merged);
+    autoBackup();
     alert(`导入成功！新增 ${newItems.length} 项${newItems.length !== imported.length ? `，跳过 ${imported.length - newItems.length} 项重复` : ''}`);
   } catch {
     alert('导入失败：文件格式不正确');
@@ -290,9 +322,7 @@ async function importData(file) {
 }
 
 async function init() {
-  // restore backup directory handle
-  backupDirHandle = await loadHandle();
-  updateBackupLabel();
+  await updateBackupLabel();
 
   // try auto-restore if list is empty
   let list = await getList();
@@ -307,6 +337,11 @@ async function init() {
   elements.exportBtn.addEventListener('click', exportData);
   elements.importBtn.addEventListener('click', () => elements.importFileInput.click());
   elements.backupDirBtn.addEventListener('click', pickBackupDir);
+  elements.reloadBtn.addEventListener('click', () => {
+    if (confirm('重新加载扩展以应用更改？侧边栏会关闭，重新点击图标即可打开。')) {
+      chrome.runtime.reload();
+    }
+  });
   elements.importFileInput.addEventListener('change', (e) => {
     if (e.target.files[0]) { importData(e.target.files[0]); e.target.value = ''; }
   });
@@ -322,7 +357,6 @@ async function init() {
   chrome.storage.onChanged.addListener((changes) => {
     if (changes[STORAGE_KEY]) {
       renderList(changes[STORAGE_KEY].newValue || []);
-      autoBackup();
     }
   });
 
