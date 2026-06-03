@@ -9,7 +9,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // 从侧边栏：打开一个新标签页并追踪
   if (msg.type === 'openItem') {
-    chrome.tabs.create({ url: msg.url, active: false }, (tab) => {
+    chrome.tabs.create({ url: msg.url, active: true }, (tab) => {
       trackedTabs.set(tab.id, msg.itemId);
     });
   }
