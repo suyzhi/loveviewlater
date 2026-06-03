@@ -60,6 +60,7 @@ function renderItem(item) {
   const titleEl = document.createElement('div');
   titleEl.className = 'list-item-title';
   titleEl.textContent = item.title || item.url;
+  if (item.strikethrough) titleEl.dataset.s = '';
 
   const domainEl = document.createElement('div');
   domainEl.className = 'list-item-domain';
@@ -118,16 +119,22 @@ async function toggleStrikethrough(id) {
   const li = document.querySelector(`.list-item[data-id="${id}"]`);
 
   if (item.strikethrough) {
-    // 取消删除线：先播反向动画，再更新数据
+    // 取消删除线
     if (li) {
       li.classList.remove('strikethrough');
       li.classList.add('strikethrough-reverse');
+      const spans = li.querySelectorAll('.list-item-title > span');
+      if (spans.length > 0) {
+        spans.forEach((span, i) => {
+          span.style.animation = `strikeLineOut 0.35s ease-out ${(i * 0.1).toFixed(2)}s forwards`;
+        });
+      }
     }
     setTimeout(async () => {
       item.strikethrough = false;
       await setList(list);
       renderList(list);
-    }, 350);
+    }, 450);
   } else {
     // 添加删除线
     item.strikethrough = true;
@@ -155,6 +162,51 @@ async function renderList(list) {
   if (isEmpty) return;
   list.forEach(item => elements.list.appendChild(renderItem(item)));
   elements.count.textContent = `共 ${list.length} 项`;
+  requestAnimationFrame(splitStrikethroughLines);
+}
+
+function splitStrikethroughLines() {
+  document.querySelectorAll('.list-item-title[data-s]').forEach(el => {
+    if (el.dataset.p) return;
+    el.dataset.p = '';
+    const text = el.textContent;
+    const lh = parseFloat(getComputedStyle(el).lineHeight);
+    if (!lh || !text) return;
+
+    // 逐字包裹测量分行
+    el.textContent = '';
+    const chars = [];
+    for (const ch of text) {
+      const s = document.createElement('s');
+      s.textContent = ch;
+      s.style.cssText = 'display:inline; white-space:pre; font:inherit';
+      el.appendChild(s);
+      chars.push(s);
+    }
+
+    // 按 offsetTop 分组
+    const lines = [{ spans: [chars[0]], text: chars[0].textContent }];
+    for (let i = 1; i < chars.length; i++) {
+      const lastTop = chars[i - 1].offsetTop;
+      if (chars[i].offsetTop > lastTop + 1) {
+        lines.push({ spans: [chars[i]], text: chars[i].textContent });
+      } else {
+        lines[lines.length - 1].spans.push(chars[i]);
+        lines[lines.length - 1].text += chars[i].textContent;
+      }
+    }
+
+    // 重建为逐行 span
+    el.textContent = '';
+    lines.forEach((line, i) => {
+      const span = document.createElement('span');
+      span.textContent = line.text;
+      span.style.display = 'block';
+      const delay = (i * 0.1).toFixed(2);
+      span.style.cssText += `animation: strikeLineIn 0.35s ease-out ${delay}s forwards;`;
+      el.appendChild(span);
+    });
+  });
 }
 
 async function addCurrentTab() {

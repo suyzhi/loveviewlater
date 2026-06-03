@@ -220,6 +220,10 @@ body {
 }
 
 .list-item.strikethrough .list-item-title {
+  opacity: 0.5;
+}
+
+.list-item.strikethrough .list-item-title:not(:has(> span)) {
   background-image: linear-gradient(
     to bottom,
     transparent calc(0.6em - 0.5px),
@@ -228,18 +232,40 @@ body {
     transparent calc(0.6em + 0.5px)
   );
   background-size: 0% 1.4em;
-  background-repeat: repeat-y;
+  background-repeat: no-repeat;
   background-position: left top;
-  opacity: 0.5;
-  animation: strikeSlideBg 0.35s ease-out forwards;
+  animation: strikeLineIn 0.35s ease-out forwards;
 }
 
-@keyframes strikeSlideBg {
+.list-item.strikethrough .list-item-title > span {
+  display: block;
+  background-image: linear-gradient(
+    to bottom,
+    transparent calc(0.6em - 0.5px),
+    var(--text) calc(0.6em - 0.5px),
+    var(--text) calc(0.6em + 0.5px),
+    transparent calc(0.6em + 0.5px)
+  );
+  background-size: 0% 1.4em;
+  background-repeat: no-repeat;
+  background-position: left top;
+}
+
+@keyframes strikeLineIn {
   from { background-size: 0% 1.4em; }
   to { background-size: 100% 1.4em; }
 }
 
+@keyframes strikeLineOut {
+  from { background-size: 100% 1.4em; }
+  to { background-size: 0% 1.4em; }
+}
+
 .list-item.strikethrough-reverse .list-item-title {
+  opacity: 0.5;
+}
+
+.list-item.strikethrough-reverse .list-item-title:not(:has(> span)) {
   background-image: linear-gradient(
     to bottom,
     transparent calc(0.6em - 0.5px),
@@ -248,15 +274,9 @@ body {
     transparent calc(0.6em + 0.5px)
   );
   background-size: 100% 1.4em;
-  background-repeat: repeat-y;
+  background-repeat: no-repeat;
   background-position: left top;
-  opacity: 0.5;
-  animation: strikeSlideBgReverse 0.35s ease-out forwards;
-}
-
-@keyframes strikeSlideBgReverse {
-  from { background-size: 100% 1.4em; }
-  to { background-size: 0% 1.4em; }
+  animation: strikeLineOut 0.35s ease-out forwards;
 }
 
 .list-item.strikethrough .list-item-domain {
