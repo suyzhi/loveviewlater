@@ -104,21 +104,6 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
     const list = result.readLaterList;
     if (list.some((i) => i.url === item.url)) return;
     list.unshift(item);
-    chrome.storage.local.set({ readLaterList: list }, () => {
-      autoBackup();
-    });
+    chrome.storage.local.set({ readLaterList: list });
   });
 });
-
-async function autoBackup() {
-  const BACKUP_FILENAME = '稍后再看自动备份.json';
-  const { readLaterList: list, backupDirName: dirName } = await chrome.storage.local.get({ readLaterList: [], backupDirName: '' });
-  const data = JSON.stringify({ version: 1, exportedAt: Date.now(), list }, null, 2);
-  const blob = new Blob([data], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const filename = dirName ? `${dirName}/${BACKUP_FILENAME}` : BACKUP_FILENAME;
-  try {
-    await chrome.downloads.download({ url, filename, saveAs: false, conflictAction: 'overwrite' });
-  } catch {}
-  URL.revokeObjectURL(url);
-}
