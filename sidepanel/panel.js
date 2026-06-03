@@ -118,7 +118,7 @@ async function toggleStrikethrough(id) {
   const li = document.querySelector(`.list-item[data-id="${id}"]`);
 
   if (item.strikethrough) {
-    // 取消删除线：先播反向动画（右→左），动画结束后再更新数据
+    // 取消删除线：先加过渡 class，动画结束后更新数据
     if (li) {
       li.classList.remove('strikethrough');
       li.classList.add('strikethrough-reverse');
@@ -127,9 +127,9 @@ async function toggleStrikethrough(id) {
       item.strikethrough = false;
       await setList(list);
       renderList(list);
-    }, 350);
+    }, 300);
   } else {
-    // 添加删除线：立即更新数据，重新渲染触发正向动画（左→右）
+    // 添加删除线
     item.strikethrough = true;
     await setList(list);
     renderList(list);
