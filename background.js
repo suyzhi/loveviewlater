@@ -74,10 +74,16 @@ chrome.action.onClicked.addListener((tab) => {
   }
 });
 
-chrome.contextMenus.onClicked.addListener((info, tab) => {
+chrome.contextMenus.onClicked.addListener(async (info, tab) => {
   let url, title;
 
-  if (info.linkUrl) {
+  // 优先使用内容脚本捕获的帖子 URL（处理 SPA 网站）
+  const { _contextLinkUrl, _contextLinkTitle } = await chrome.storage.session.get(['_contextLinkUrl', '_contextLinkTitle']);
+  if (_contextLinkUrl) {
+    await chrome.storage.session.remove(['_contextLinkUrl', '_contextLinkTitle']);
+    url = _contextLinkUrl;
+    title = info.selectionText || _contextLinkTitle || url;
+  } else if (info.linkUrl) {
     // 右键的是链接
     url = info.linkUrl;
     title = info.selectionText || info.linkUrl;
