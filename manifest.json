@@ -10,7 +10,6 @@
   },
   "permissions": [
     "storage",
-    "session",
     "contextMenus",
     "sidePanel",
     "tabs",

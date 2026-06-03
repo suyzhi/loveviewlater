@@ -2,10 +2,17 @@ let panelOpen = false;
 
 // tabId -> itemId 映射，用于追踪从稍后再看打开的页面
 const trackedTabs = new Map();
+// 内容脚本发来的右键上下文 URL
+let pendingContextUrl = null;
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'panelOpened') panelOpen = true;
   if (msg.type === 'panelClosed') panelOpen = false;
+
+  // 从内容脚本：右键点击的 URL
+  if (msg.type === 'contextUrl') {
+    pendingContextUrl = { url: msg.url, title: msg.title };
+  }
 
   // 从侧边栏：打开一个新标签页并追踪
   if (msg.type === 'openItem') {
@@ -74,15 +81,14 @@ chrome.action.onClicked.addListener((tab) => {
   }
 });
 
-chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+chrome.contextMenus.onClicked.addListener((info, tab) => {
   let url, title;
 
-  // 优先使用内容脚本捕获的帖子 URL（处理 SPA 网站）
-  const { _contextLinkUrl, _contextLinkTitle } = await chrome.storage.session.get(['_contextLinkUrl', '_contextLinkTitle']);
-  if (_contextLinkUrl) {
-    await chrome.storage.session.remove(['_contextLinkUrl', '_contextLinkTitle']);
-    url = _contextLinkUrl;
-    title = info.selectionText || _contextLinkTitle || url;
+  // 优先使用内容脚本发来的帖子 URL（处理 SPA 网站）
+  if (pendingContextUrl) {
+    url = pendingContextUrl.url;
+    title = info.selectionText || pendingContextUrl.title || url;
+    pendingContextUrl = null;
   } else if (info.linkUrl) {
     // 右键的是链接
     url = info.linkUrl;
