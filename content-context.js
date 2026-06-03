@@ -1,55 +1,48 @@
-// 捕获右键点击的帖子/链接 URL，通过消息发送给 background
-// 用于 X/Twitter、Reddit 等 SPA 网站
-
-function getHoveredText(target) {
-  // 从鼠标所在元素取文本，向上走到有意义的文本块
-  let el = target;
-  for (let i = 0; el && el !== document.body && el !== document.documentElement && i < 5; i++) {
-    const t = (el.textContent || '').trim();
-    if (t.length >= 10) return t;
-    el = el.parentElement;
-  }
-  return (target.textContent || '').trim();
-}
+// 捕获右键点击的帖子 URL，通过消息发送给 background
+// 标题用帖子的完整原文
 
 document.addEventListener(
   'contextmenu',
   (e) => {
-    const hoverText = getHoveredText(e.target);
     let result = null;
 
     // 策略 1：向上遍历找 <a> 标签
     let el = e.target;
     while (el && el !== document.body && el !== document.documentElement) {
       if (el.tagName === 'A' && el.href && !el.href.startsWith('javascript:')) {
-        result = { url: el.href, title: hoverText || el.textContent?.trim() };
+        result = { url: el.href, title: el.textContent?.trim() };
         break;
       }
       el = el.parentElement;
     }
 
-    // 策略 2：找文章/帖子容器提取链接
+    // 策略 2：找文章/帖子容器
     if (!result) {
       el = e.target;
       while (el && el !== document.body && el !== document.documentElement) {
         if (el.matches('article, [role="article"], [data-testid="tweet"]')) {
-          result = extractPostLink(el);
-          if (result) result.title = hoverText || result.title;
+          const link = findPostUrl(el);
+          if (link) result = { url: link, title: extractFullText(el) };
           break;
         }
         el = el.parentElement;
       }
     }
 
-    // 策略 3：就近找 a 标签
+    // 策略 3：就近 a 标签
     if (!result) {
       const nearby = e.target.closest('a[href]');
       if (nearby && nearby.href && !nearby.href.startsWith('javascript:')) {
-        result = { url: nearby.href, title: hoverText || nearby.textContent?.trim() };
+        // 看看它是否在文章容器里
+        const art = nearby.closest('article, [role="article"]');
+        result = {
+          url: nearby.href,
+          title: art ? extractFullText(art) : nearby.textContent?.trim(),
+        };
       }
     }
 
-    // 策略 4：在 document 中找最近的帖子容器
+    // 策略 4：按距离找最近的帖子容器
     if (!result) {
       const articles = document.querySelectorAll('article, [role="article"]');
       let best = null;
@@ -60,8 +53,8 @@ document.addEventListener(
         if (d < bestDist) { bestDist = d; best = art; }
       }
       if (best) {
-        result = extractPostLink(best);
-        if (result) result.title = hoverText || result.title;
+        const link = findPostUrl(best);
+        if (link) result = { url: link, title: extractFullText(best) };
       }
     }
 
@@ -72,20 +65,20 @@ document.addEventListener(
   { capture: true }
 );
 
-function extractPostLink(container) {
+function findPostUrl(container) {
   // 1. 包含 <time> 的链接（X 帖子永久链接）
   const byTime = container.querySelector('a time, a[datetime]');
   if (byTime) {
     const a = byTime.closest('a');
-    if (a?.href) return { url: a.href, title: '' };
+    if (a?.href) return a.href;
   }
 
   const all = [...container.querySelectorAll('a[href]')].filter((a) => !a.href.startsWith('javascript:'));
 
-  // 2. 包含帖子 URL 模式的链接
+  // 2. 含帖子 URL 模式
   for (const a of all) {
     if (a.href.includes('/status/') || a.href.includes('/post/') || a.href.includes('/comments/')) {
-      return { url: a.href, title: '' };
+      return a.href;
     }
   }
 
@@ -99,10 +92,26 @@ function extractPostLink(container) {
       bestLen = t.length;
     }
   }
-  if (best) return { url: best.href, title: '' };
+  if (best) return best.href;
 
-  // 4. 任意链接兜底
-  if (all[0]) return { url: all[0].href, title: '' };
+  // 4. 任意链接
+  return all[0]?.href || null;
+}
 
-  return null;
+function extractFullText(container) {
+  // X/Twitter
+  const tweetText = container.querySelector('[data-testid="tweetText"]');
+  if (tweetText) return tweetText.textContent?.trim() || '';
+
+  // Reddit / 通用
+  const postContent = container.querySelector('[data-testid="postText"], .post-content, [itemprop="articleBody"], .entry-content');
+  if (postContent) return postContent.textContent?.trim() || '';
+
+  // 兜底：收集所有非空段落
+  const parts = [];
+  for (const p of container.querySelectorAll('p, h1, h2, h3, h4, h5, h6, li, [dir="auto"]')) {
+    const t = (p.textContent || '').trim();
+    if (t && t.length > 3) parts.push(t);
+  }
+  return parts.join('\n').slice(0, 1000);
 }
