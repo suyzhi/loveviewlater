@@ -220,14 +220,49 @@ body {
 }
 
 .list-item.strikethrough .list-item-title {
+  position: relative;
+  display: inline-block;
   text-decoration: line-through;
   opacity: 0.5;
 }
 
+.list-item.strikethrough .list-item-title::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 100%;
+  height: 1px;
+  background: var(--text);
+  animation: strikeSlide 0.35s ease-out forwards;
+}
+
+@keyframes strikeSlide {
+  from { width: 0; }
+  to { width: 100%; }
+}
+
 .list-item.strikethrough-reverse .list-item-title {
+  position: relative;
+  display: inline-block;
   text-decoration: line-through;
-  opacity: 0.6;
-  transition: opacity 0.3s;
+  opacity: 0.5;
+}
+
+.list-item.strikethrough-reverse .list-item-title::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 100%;
+  height: 1px;
+  background: var(--text);
+  animation: strikeSlideReverse 0.35s ease-out forwards;
+}
+
+@keyframes strikeSlideReverse {
+  from { width: 100%; }
+  to { width: 0; }
 }
 
 .list-item.strikethrough .list-item-domain {

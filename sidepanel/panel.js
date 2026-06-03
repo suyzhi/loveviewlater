@@ -127,7 +127,7 @@ async function toggleStrikethrough(id) {
       item.strikethrough = false;
       await setList(list);
       renderList(list);
-    }, 300);
+    }, 350);
   } else {
     // 添加删除线
     item.strikethrough = true;
