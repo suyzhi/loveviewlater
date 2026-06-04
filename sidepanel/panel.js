@@ -1,4 +1,5 @@
 const STORAGE_KEY = 'readLaterList';
+const processedAnimations = new Set();
 
 const elements = {
   list: document.getElementById('list'),
@@ -131,7 +132,6 @@ async function toggleStrikethrough(id) {
       spans.forEach((span, i) => {
         span.style.animation = `strikeLineOut 0.35s ease-out ${(i * 0.1).toFixed(2)}s forwards`;
       });
-      // 单行无 span 的情况，CSS 的 :not(:has(> span)) 会处理
     }
     setTimeout(() => {
       const newLi = renderItem(item);
@@ -139,7 +139,8 @@ async function toggleStrikethrough(id) {
       updateCount();
     }, 450);
   } else {
-    // 添加删除线：替换为新元素，动画自然触发
+    // 添加删除线：允许此条重新播放动画
+    processedAnimations.delete(item.id);
     const newLi = renderItem(item);
     oldLi.parentNode?.replaceChild(newLi, oldLi);
     requestAnimationFrame(splitStrikethroughLines);
@@ -185,8 +186,9 @@ async function renderList(list) {
 
 function splitStrikethroughLines() {
   document.querySelectorAll('.list-item-title[data-s]').forEach(el => {
-    if (el.dataset.p) return;
-    el.dataset.p = '';
+    const itemId = el.closest('.list-item')?.dataset.id;
+    if (!itemId || processedAnimations.has(itemId)) return;
+    processedAnimations.add(itemId);
     const text = el.textContent;
     const lh = parseFloat(getComputedStyle(el).lineHeight);
     if (!lh || !text) return;
@@ -309,7 +311,20 @@ async function init() {
       window.close();
     }
     if (msg.type === 'listUpdated') {
-      getList().then(renderList);
+      // 增量更新，不触发全量重绘
+      chrome.storage.local.get({ [STORAGE_KEY]: [] }, (result) => {
+        const newList = result[STORAGE_KEY];
+        const existingIds = new Set([...document.querySelectorAll('.list-item')].map(li => li.dataset.id));
+        const toAdd = newList.filter(item => !existingIds.has(item.id));
+        if (toAdd.length > 0) {
+          elements.emptyState.classList.add('hidden');
+          elements.footer.classList.remove('hidden');
+          for (const item of toAdd) {
+            elements.list.prepend(renderItem(item));
+          }
+          updateCount();
+        }
+      });
     }
   });
 
