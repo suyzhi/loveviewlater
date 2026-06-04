@@ -279,6 +279,19 @@ body {
   animation: strikeLineOut 0.35s ease-out forwards;
 }
 
+/* 多行反向：背景由 JS 设置 animation，CSS 提供 background-image */
+.list-item.strikethrough-reverse .list-item-title > span {
+  background-image: linear-gradient(
+    to bottom,
+    transparent calc(0.6em - 0.5px),
+    var(--text) calc(0.6em - 0.5px),
+    var(--text) calc(0.6em + 0.5px),
+    transparent calc(0.6em + 0.5px)
+  );
+  background-repeat: no-repeat;
+  background-position: left top;
+}
+
 .list-item.strikethrough .list-item-domain {
   opacity: 0.4;
 }
