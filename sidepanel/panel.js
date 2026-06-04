@@ -117,32 +117,43 @@ async function toggleStrikethrough(id) {
   const item = list.find(i => i.id === id);
   if (!item) return;
 
-  const oldLi = document.querySelector(`.list-item[data-id="${id}"]`);
-  if (!oldLi) return;
+  const li = document.querySelector(`.list-item[data-id="${id}"]`);
+  if (!li) return;
 
   item.strikethrough = !item.strikethrough;
   await setList(list);
 
+  const titleEl = li.querySelector('.list-item-title');
+
   if (!item.strikethrough) {
-    // 取消删除线：先播反向动画，再替换元素
-    if (oldLi) {
-      oldLi.classList.remove('strikethrough');
-      oldLi.classList.add('strikethrough-reverse');
-      const spans = oldLi.querySelectorAll('.list-item-title > span');
+    // 取消删除线：直接操作现有 DOM
+    li.classList.remove('strikethrough');
+    li.classList.add('strikethrough-reverse');
+    const spans = titleEl?.querySelectorAll(':scope > span');
+    if (spans?.length > 0) {
       spans.forEach((span, i) => {
         span.style.animation = `strikeLineOut 0.35s ease-out ${(i * 0.1).toFixed(2)}s forwards`;
       });
     }
     setTimeout(() => {
-      const newLi = renderItem(item);
-      oldLi.parentNode?.replaceChild(newLi, oldLi);
+      li.classList.remove('strikethrough-reverse');
+      if (titleEl) {
+        titleEl.innerHTML = '';
+        titleEl.textContent = item.title || item.url;
+        delete titleEl.dataset.s;
+        titleEl.style.cssText = '';
+      }
       updateCount();
     }, 450);
   } else {
-    // 添加删除线：允许此条重新播放动画
+    // 添加删除线：直接修改现有 DOM
+    li.classList.add('strikethrough');
+    if (titleEl) {
+      titleEl.innerHTML = '';
+      titleEl.textContent = item.title || item.url;
+      titleEl.dataset.s = '';
+    }
     processedAnimations.delete(item.id);
-    const newLi = renderItem(item);
-    oldLi.parentNode?.replaceChild(newLi, oldLi);
     requestAnimationFrame(splitStrikethroughLines);
     updateCount();
   }
