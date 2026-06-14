@@ -1,10 +1,17 @@
 // 捕获右键点击的帖子 URL，通过消息发送给 background
 // 标题用帖子完整原文
 
+let lastContextMeta = null;
+
 document.addEventListener(
   'contextmenu',
   (e) => {
     let result = null;
+    lastContextMeta = {
+      x: e.clientX,
+      y: e.clientY,
+      label: getContextLabel(e.target),
+    };
 
     // 策略 1：向上遍历找 <a> 标签
     let el = e.target;
@@ -58,7 +65,16 @@ document.addEventListener(
     }
 
     if (result) {
-      chrome.runtime.sendMessage({ type: 'contextUrl', url: result.url, title: result.title || result.url });
+      chrome.runtime.sendMessage({
+        type: 'contextUrl',
+        url: result.url,
+        title: result.title || result.url,
+        label: result.title || lastContextMeta.label || result.url,
+        x: e.clientX,
+        y: e.clientY,
+      });
+    } else {
+      chrome.runtime.sendMessage({ type: 'contextMeta', ...lastContextMeta });
     }
   },
   { capture: true }
@@ -100,4 +116,10 @@ function extractFullText(container) {
     if (t && t.length > 3) parts.push(t);
   }
   return parts.join('\n').slice(0, 1000);
+}
+
+function getContextLabel(target) {
+  const link = target?.closest?.('a[href]');
+  const text = link?.textContent?.trim() || target?.textContent?.trim() || document.title || '稍后再看';
+  return text.replace(/\s+/g, ' ').slice(0, 42);
 }

@@ -97,17 +97,60 @@ function notifyPanel(message) {
   chrome.runtime.sendMessage(message).catch(() => {});
 }
 
+function notifyTab(tabId, message) {
+  if (tabId === undefined) return;
+  chrome.tabs.sendMessage(tabId, message).catch(() => {});
+}
+
+function playAddAnimation(tabId, payload) {
+  if (tabId === undefined) return;
+  chrome.scripting
+    .executeScript({
+      target: { tabId },
+      func: (animationPayload) => {
+        globalThis.__readLaterAnimationPayload = animationPayload;
+      },
+      args: [payload],
+    })
+    .then(() => chrome.scripting.executeScript({
+      target: { tabId },
+      files: ['content-add-animation.js'],
+    }))
+    .catch(() => {
+      notifyTab(tabId, { type: 'playAddAnimation', ...payload });
+    });
+}
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'panelOpened') panelOpen = true;
   if (msg.type === 'panelClosed') panelOpen = false;
 
   // 从内容脚本：右键点击的 URL
+  if (msg.type === 'contextMeta') {
+    const tabId = sender.tab?.id;
+    if (tabId !== undefined) {
+      const existing = pendingContextByTab.get(tabId) || {};
+      pendingContextByTab.set(tabId, {
+        ...existing,
+        x: msg.x,
+        y: msg.y,
+        label: msg.label,
+        createdAt: Date.now(),
+      });
+    }
+  }
+
   if (msg.type === 'contextUrl') {
     const tabId = sender.tab?.id;
     if (tabId !== undefined) {
+      const existing = pendingContextByTab.get(tabId) || {};
       pendingContextByTab.set(tabId, {
+        ...existing,
         url: msg.url,
         title: msg.title,
+        x: msg.x ?? existing.x,
+        y: msg.y ?? existing.y,
+        label: msg.label || msg.title || existing.label,
         createdAt: Date.now(),
       });
     }
@@ -201,7 +244,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   const pendingContext = tab?.id !== undefined ? pendingContextByTab.get(tab.id) : null;
 
   // 优先使用内容脚本发来的帖子 URL（处理 SPA 网站）
-  if (pendingContext) {
+  if (pendingContext?.url) {
     url = pendingContext.url;
     title = info.selectionText || pendingContext.title || url;
     pendingContextByTab.delete(tab.id);
@@ -229,6 +272,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   }
 
   if (!url) return;
+  if (tab?.id !== undefined) pendingContextByTab.delete(tab.id);
   const normalizedUrl = normalizeUrl(url);
   const source = buildSource(tab, info.pageUrl);
 
@@ -250,6 +294,14 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
       list.unshift(existing);
       chrome.storage.local.set({ [STORAGE_KEY]: list }, () => {
         notifyPanel({ type: 'itemDuplicate', itemId: existing.id, title: existing.title || existing.url });
+        playAddAnimation(tab?.id, {
+          duplicate: true,
+          context: pendingContext,
+          title: existing.title || existing.url,
+          label: existing.title || existing.url,
+          x: pendingContext?.x,
+          y: pendingContext?.y,
+        });
       });
       return;
     }
@@ -257,6 +309,13 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
     chrome.storage.local.set({ [STORAGE_KEY]: list }, () => {
       // 通知侧边栏刷新
       notifyPanel({ type: 'listUpdated', title: item.title || item.url });
+      playAddAnimation(tab?.id, {
+        context: pendingContext,
+        title: item.title || item.url,
+        label: item.title || item.url,
+        x: pendingContext?.x,
+        y: pendingContext?.y,
+      });
     });
   });
 });
