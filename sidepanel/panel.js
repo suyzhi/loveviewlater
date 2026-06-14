@@ -26,6 +26,10 @@ const viewState = {
 };
 
 let toastTimer = null;
+let pendingDelete = null;
+let observedListRects = new Map();
+let listResizeObserver = null;
+let resizeAnimationFrame = null;
 
 async function getList() {
   const result = await chrome.storage.local.get({ [STORAGE_KEY]: [] });
@@ -133,6 +137,117 @@ function getVisibleList() {
   return sortItems(viewState.list.filter(item => matchesFilter(item) && matchesSearch(item)));
 }
 
+function getListItemRects() {
+  const rects = new Map();
+  document.querySelectorAll('.list-item').forEach((el) => {
+    rects.set(el.dataset.id, el.getBoundingClientRect());
+  });
+  return rects;
+}
+
+function animateListMovement(fromRects) {
+  requestAnimationFrame(() => {
+    document.querySelectorAll('.list-item').forEach((el) => {
+      const from = fromRects.get(el.dataset.id);
+      const to = el.getBoundingClientRect();
+      if (!from) {
+        el.animate(
+          [
+            { opacity: 0, transform: 'translateY(6px)' },
+            { opacity: 1, transform: 'translateY(0)' },
+          ],
+          { duration: 180, easing: 'cubic-bezier(.2,.8,.2,1)' }
+        );
+        return;
+      }
+
+      const dx = from.left - to.left;
+      const dy = from.top - to.top;
+      if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return;
+
+      el.animate(
+        [
+          { transform: `translate(${dx}px, ${dy}px)` },
+          { transform: 'translate(0, 0)' },
+        ],
+        { duration: 260, easing: 'cubic-bezier(.2,.8,.2,1)' }
+      );
+    });
+    observedListRects = getListItemRects();
+  });
+}
+
+function animateItemsBelowResize(fromRects, changedRects) {
+  requestAnimationFrame(() => {
+    const changedBottoms = [...changedRects.values()]
+      .map((rect) => rect.bottom)
+      .sort((a, b) => a - b);
+
+    document.querySelectorAll('.list-item').forEach((el) => {
+      const from = fromRects.get(el.dataset.id);
+      const to = el.getBoundingClientRect();
+      if (!from || changedRects.has(el.dataset.id)) return;
+
+      const affected = changedBottoms.some((bottom) => from.top >= bottom - 0.5);
+      if (!affected) return;
+
+      const dy = from.top - to.top;
+      if (Math.abs(dy) < 0.5) return;
+
+      el.animate(
+        [
+          { transform: `translateY(${dy}px)` },
+          { transform: 'translateY(0)' },
+        ],
+        { duration: 260, easing: 'cubic-bezier(.2,.8,.2,1)' }
+      );
+    });
+
+    observedListRects = getListItemRects();
+  });
+}
+
+function animateLayoutChange(change) {
+  const before = getListItemRects();
+  change();
+  animateListMovement(before);
+}
+
+function observeListLayout() {
+  if (!('ResizeObserver' in window)) {
+    observedListRects = getListItemRects();
+    return;
+  }
+
+  if (!listResizeObserver) {
+    listResizeObserver = new ResizeObserver((entries) => {
+      if (resizeAnimationFrame) return;
+      const before = observedListRects;
+      const changedRects = new Map();
+      entries.forEach((entry) => {
+        const id = entry.target.dataset.id;
+        const previous = before.get(id);
+        const current = entry.target.getBoundingClientRect();
+        if (id && previous && Math.abs(previous.height - current.height) > 0.5) {
+          changedRects.set(id, previous);
+        }
+      });
+      if (changedRects.size === 0) {
+        observedListRects = getListItemRects();
+        return;
+      }
+      resizeAnimationFrame = requestAnimationFrame(() => {
+        resizeAnimationFrame = null;
+        animateItemsBelowResize(before, changedRects);
+      });
+    });
+  }
+
+  listResizeObserver.disconnect();
+  document.querySelectorAll('.list-item').forEach((el) => listResizeObserver.observe(el));
+  observedListRects = getListItemRects();
+}
+
 function renderItem(item) {
   const li = document.createElement('li');
   li.className = 'list-item';
@@ -215,17 +330,31 @@ function renderItem(item) {
   deleteBtn.setAttribute('aria-label', '永久删除');
   deleteBtn.addEventListener('click', (e) => {
     e.stopPropagation();
-    if (confirm(`确定永久删除「${item.title}」？`)) {
+    if (deleteBtn.classList.contains('confirming')) {
       deleteItem(item.id);
+      return;
     }
+    armDeleteButton(deleteBtn);
   });
   deleteBtn.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     e.stopPropagation();
   });
 
+  const cancelDeleteBtn = document.createElement('button');
+  cancelDeleteBtn.className = 'list-item-cancel-delete';
+  cancelDeleteBtn.textContent = '取消';
+  cancelDeleteBtn.title = '取消删除';
+  cancelDeleteBtn.tabIndex = -1;
+  cancelDeleteBtn.setAttribute('aria-label', '取消删除');
+  cancelDeleteBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    resetPendingDelete(deleteBtn);
+  });
+
   actions.appendChild(readCheckbox);
   actions.appendChild(deleteBtn);
+  actions.appendChild(cancelDeleteBtn);
 
   li.appendChild(favicon);
   li.appendChild(content);
@@ -306,6 +435,42 @@ function openItem(item) {
   });
 }
 
+function armDeleteButton(button) {
+  resetPendingDelete();
+  const cancelButton = button.parentElement?.querySelector('.list-item-cancel-delete');
+
+  button.classList.add('confirming');
+  button.textContent = '删除';
+  button.title = '确认删除';
+  button.setAttribute('aria-label', '确认删除');
+  if (cancelButton) {
+    cancelButton.classList.add('show');
+    cancelButton.tabIndex = 0;
+  }
+
+  pendingDelete = {
+    button,
+    cancelButton,
+    timer: setTimeout(() => resetPendingDelete(button), 3000),
+  };
+}
+
+function resetPendingDelete(exceptButton = null) {
+  if (!pendingDelete) return;
+  const { button, cancelButton, timer } = pendingDelete;
+  if (exceptButton && button !== exceptButton) return;
+  clearTimeout(timer);
+  button.classList.remove('confirming');
+  button.textContent = '🗑';
+  button.title = '永久删除';
+  button.setAttribute('aria-label', '永久删除');
+  if (cancelButton) {
+    cancelButton.classList.remove('show');
+    cancelButton.tabIndex = -1;
+  }
+  pendingDelete = null;
+}
+
 function openSource(item) {
   const url = item.sourceUrl || item.url;
   if (!url) return;
@@ -338,6 +503,7 @@ function updateEmptyState(visibleCount, totalCount) {
 }
 
 function renderList(list = viewState.list) {
+  const before = getListItemRects();
   viewState.list = list;
   const visibleList = getVisibleList();
   const isEmpty = viewState.list.length === 0;
@@ -351,6 +517,8 @@ function renderList(list = viewState.list) {
   elements.count.textContent = visibleList.length === viewState.list.length
     ? `共 ${viewState.list.length} 项`
     : `显示 ${visibleList.length} / 共 ${viewState.list.length} 项`;
+  animateListMovement(before);
+  observeListLayout();
   requestAnimationFrame(splitStrikethroughLines);
 }
 
@@ -493,6 +661,7 @@ async function init() {
     viewState.sort = e.target.value;
     renderList();
   });
+  document.addEventListener('click', () => resetPendingDelete());
   elements.clearBtn.addEventListener('click', clearAll);
   elements.exportBtn.addEventListener('click', exportData);
   elements.importBtn.addEventListener('click', () => elements.importFileInput.click());

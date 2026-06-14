@@ -203,17 +203,25 @@ body {
 }
 
 .list-item {
+  position: relative;
   display: flex;
   align-items: flex-start;
   gap: 10px;
   padding: 10px 16px;
   border-bottom: 1px solid var(--border);
+  background: var(--bg);
   cursor: pointer;
   transition: background 0.15s;
+  will-change: transform;
+  z-index: 0;
 }
 
 .list-item:hover {
   background: var(--bg-hover);
+}
+
+.list-item:has(.list-item-delete.confirming) {
+  z-index: 1;
 }
 
 .list-item-favicon {
@@ -267,6 +275,7 @@ body {
 .list-item-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 4px;
   flex-shrink: 0;
 }
@@ -284,7 +293,7 @@ body {
   background: none;
   border: none;
   color: var(--text-secondary);
-  font-size: 14px;
+  font-size: 13px;
   line-height: 1;
   cursor: pointer;
   width: 24px;
@@ -293,11 +302,63 @@ body {
   border-radius: 4px;
   flex-shrink: 0;
   opacity: 0.5;
-  transition: all 0.15s;
+  overflow: hidden;
+  white-space: nowrap;
+  transition:
+    width 0.22s cubic-bezier(.2,.8,.2,1),
+    background 0.18s,
+    color 0.18s,
+    border-color 0.18s,
+    opacity 0.15s;
 }
 
 .list-item:hover .list-item-delete {
   opacity: 1;
+}
+
+.list-item-delete.confirming {
+  width: 46px;
+  background: var(--danger);
+  color: #fff;
+  font-weight: 600;
+  opacity: 1;
+}
+
+.list-item-delete.confirming:hover {
+  background: var(--danger-hover);
+}
+
+.list-item-cancel-delete {
+  width: 0;
+  height: 24px;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  flex-shrink: 0;
+  font-size: 12px;
+  opacity: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  transition:
+    width 0.22s cubic-bezier(.2,.8,.2,1),
+    padding 0.22s cubic-bezier(.2,.8,.2,1),
+    opacity 0.16s,
+    background 0.16s,
+    color 0.16s;
+}
+
+.list-item-cancel-delete.show {
+  width: 34px;
+  padding: 0 4px;
+  opacity: 1;
+}
+
+.list-item-cancel-delete.show:hover {
+  background: var(--bg-hover);
+  color: var(--text);
 }
 
 .list-item.strikethrough .list-item-title {
