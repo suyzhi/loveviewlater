@@ -36,6 +36,7 @@ body {
   color: var(--text);
   font-size: 14px;
   line-height: 1.5;
+  height: 100vh;
   overflow-x: hidden;
 }
 
@@ -49,7 +50,7 @@ body {
   flex-direction: column;
   width: 100vw;
   min-width: 0;
-  min-height: 100vh;
+  height: 100vh;
   overflow: hidden;
   animation: slideIn 0.25s cubic-bezier(.2,.8,.2,1);
   transition:
@@ -201,6 +202,9 @@ body {
 .list {
   list-style: none;
   flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .list-item {
@@ -458,10 +462,9 @@ body {
   justify-content: space-between;
   padding: 10px 16px;
   border-top: 1px solid var(--border);
-  position: sticky;
-  bottom: 0;
   background: var(--bg);
   gap: 12px;
+  flex-shrink: 0;
 }
 
 .footer-left,
