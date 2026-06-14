@@ -44,16 +44,21 @@ body {
   to { transform: translateX(0); opacity: 1; }
 }
 
-@keyframes slideOut {
-  from { transform: translateX(0); opacity: 1; }
-  to { transform: translateX(100%); opacity: 0; }
-}
-
 #app {
   display: flex;
   flex-direction: column;
+  width: 100vw;
+  min-width: 0;
   min-height: 100vh;
-  animation: slideIn 0.25s ease;
+  overflow: hidden;
+  animation: slideIn 0.25s cubic-bezier(.2,.8,.2,1);
+  transition:
+    width 0.42s cubic-bezier(.4,0,.2,1),
+    opacity 0.24s ease;
+}
+
+#app.collapse-out {
+  opacity: 0;
 }
 
 .header {
@@ -187,10 +192,6 @@ body {
 .empty-hint {
   font-size: 13px;
   color: var(--text-secondary);
-}
-
-.slide-out {
-  animation: slideOut 0.25s ease forwards;
 }
 
 .hidden {

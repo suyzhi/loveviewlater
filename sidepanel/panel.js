@@ -30,6 +30,8 @@ let pendingDelete = null;
 let observedListRects = new Map();
 let listResizeObserver = null;
 let resizeAnimationFrame = null;
+let closingPanel = false;
+let panelPort = null;
 
 async function getList() {
   const result = await chrome.storage.local.get({ [STORAGE_KEY]: [] });
@@ -94,6 +96,34 @@ function showToast(message) {
   toastTimer = setTimeout(() => {
     elements.toast.classList.remove('show');
   }, 2200);
+}
+
+function closePanelWithAnimation() {
+  if (closingPanel) return;
+  closingPanel = true;
+
+  const app = document.getElementById('app');
+  app.style.width = `${app.getBoundingClientRect().width}px`;
+  app.getBoundingClientRect();
+  app.classList.add('collapse-out');
+  app.style.width = '0px';
+  chrome.runtime.sendMessage({ type: 'panelClosing' }).catch(() => {});
+
+  let closed = false;
+  const finishClose = () => {
+    if (closed) return;
+    closed = true;
+    chrome.runtime.sendMessage({ type: 'panelClosed' }).catch(() => {});
+    window.close();
+  };
+  const handleTransitionEnd = (e) => {
+    if (e.target !== app) return;
+    if (e.propertyName !== 'width') return;
+    app.removeEventListener('transitionend', handleTransitionEnd);
+    finishClose();
+  };
+  app.addEventListener('transitionend', handleTransitionEnd);
+  setTimeout(finishClose, 460);
 }
 
 function matchesFilter(item) {
@@ -645,6 +675,7 @@ async function importData(file) {
 }
 
 async function init() {
+  panelPort = chrome.runtime.connect({ name: 'sidePanel' });
   const list = await getList();
   renderList(list);
 
@@ -678,7 +709,7 @@ async function init() {
 
   chrome.runtime.onMessage.addListener((msg) => {
     if (msg.type === 'closePanel') {
-      window.close();
+      closePanelWithAnimation();
     }
     if (msg.type === 'listUpdated') {
       chrome.storage.local.get({ [STORAGE_KEY]: [] }, (result) => {
@@ -733,8 +764,7 @@ async function init() {
   });
 
   window.addEventListener('pagehide', () => {
-    chrome.runtime.sendMessage({ type: 'panelClosed' });
-    document.getElementById('app').classList.add('slide-out');
+    chrome.runtime.sendMessage({ type: 'panelClosed' }).catch(() => {});
   });
 }
 

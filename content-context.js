@@ -2,6 +2,7 @@
 // 标题用帖子完整原文
 
 let lastContextMeta = null;
+let lastPageClickAt = 0;
 
 document.addEventListener(
   'contextmenu',
@@ -80,6 +81,21 @@ document.addEventListener(
   { capture: true }
 );
 
+document.addEventListener(
+  'pointerdown',
+  (e) => {
+    if (e.button !== 0) return;
+    if (isEditingTarget(e.target)) return;
+
+    const now = Date.now();
+    if (now - lastPageClickAt < 250) return;
+    lastPageClickAt = now;
+
+    chrome.runtime.sendMessage({ type: 'pageClicked' }).catch(() => {});
+  },
+  { capture: true }
+);
+
 function findPostUrl(container) {
   const byTime = container.querySelector('a time, a[datetime]');
   if (byTime) {
@@ -122,4 +138,8 @@ function getContextLabel(target) {
   const link = target?.closest?.('a[href]');
   const text = link?.textContent?.trim() || target?.textContent?.trim() || document.title || '稍后再看';
   return text.replace(/\s+/g, ' ').slice(0, 42);
+}
+
+function isEditingTarget(target) {
+  return !!target?.closest?.('input, textarea, select, [contenteditable="true"], [role="textbox"]');
 }

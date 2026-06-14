@@ -1,4 +1,7 @@
 let panelOpen = false;
+let panelClosing = false;
+let reopenAfterCloseWindowId = null;
+let panelPort = null;
 
 const STORAGE_KEY = 'readLaterList';
 const CONTEXT_TTL_MS = 5000;
@@ -97,6 +100,10 @@ function notifyPanel(message) {
   chrome.runtime.sendMessage(message).catch(() => {});
 }
 
+function sendPanelMessage(message) {
+  return chrome.runtime.sendMessage(message);
+}
+
 function notifyTab(tabId, message) {
   if (tabId === undefined) return;
   chrome.tabs.sendMessage(tabId, message).catch(() => {});
@@ -121,9 +128,49 @@ function playAddAnimation(tabId, payload) {
     });
 }
 
+function reopenPanelIfRequested() {
+  if (reopenAfterCloseWindowId === null) return;
+  const windowId = reopenAfterCloseWindowId;
+  reopenAfterCloseWindowId = null;
+  chrome.sidePanel.open({ windowId }).catch(() => {});
+}
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'sidePanel') return;
+  panelPort = port;
+  panelOpen = true;
+  panelClosing = false;
+  reopenAfterCloseWindowId = null;
+
+  port.onDisconnect.addListener(() => {
+    if (panelPort === port) panelPort = null;
+    panelOpen = false;
+    panelClosing = false;
+    reopenPanelIfRequested();
+  });
+});
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.type === 'panelOpened') panelOpen = true;
-  if (msg.type === 'panelClosed') panelOpen = false;
+  if (msg.type === 'panelOpened') {
+    panelOpen = true;
+    panelClosing = false;
+    reopenAfterCloseWindowId = null;
+  }
+  if (msg.type === 'panelClosing') {
+    panelClosing = true;
+  }
+  if (msg.type === 'panelClosed') {
+    panelOpen = false;
+    panelClosing = false;
+    reopenPanelIfRequested();
+  }
+
+  if (msg.type === 'pageClicked') {
+    const windowId = sender.tab?.windowId;
+    if (panelOpen && !panelClosing) {
+      closePanelWithState(windowId);
+    }
+  }
 
   // 从内容脚本：右键点击的 URL
   if (msg.type === 'contextMeta') {
@@ -219,24 +266,65 @@ function injectScrollTracker(tabId) {
     });
 }
 
-// ---- 以下原有代码不变 ----
-
-chrome.runtime.onInstalled.addListener(() => {
+function ensureContextMenu() {
   chrome.contextMenus.create({
     id: 'addToReadLater',
     title: '添加到稍后再看',
-    contexts: ['page', 'link', 'image', 'video', 'audio', 'selection'],
+    contexts: ['all'],
+  }, () => {
+    // 重复创建同一个菜单 ID 时 Chrome 会设置 lastError；菜单已存在即可。
+    chrome.runtime.lastError;
   });
-});
+}
+
+function resetContextMenu() {
+  chrome.contextMenus.removeAll(ensureContextMenu);
+}
+
+ensureContextMenu();
+chrome.runtime.onInstalled.addListener(resetContextMenu);
+chrome.runtime.onStartup.addListener(ensureContextMenu);
 
 chrome.action.onClicked.addListener((tab) => {
   if (panelOpen) {
-    notifyPanel({ type: 'closePanel' });
-    panelOpen = false;
+    if (panelClosing) {
+      reopenAfterCloseWindowId = tab.windowId;
+      return;
+    }
+    closePanelWithState(tab.windowId);
   } else {
-    chrome.sidePanel.open({ windowId: tab.windowId });
+    chrome.sidePanel.open({ windowId: tab.windowId }).catch(() => {});
   }
 });
+
+function closePanelWithState(windowId) {
+  if (!panelPort) {
+    panelOpen = false;
+    panelClosing = false;
+    if (windowId !== undefined) {
+      chrome.sidePanel.open({ windowId }).catch(() => {});
+    }
+    return;
+  }
+
+  panelClosing = true;
+  reopenAfterCloseWindowId = null;
+  setTimeout(() => {
+    if (!panelClosing) return;
+    panelOpen = false;
+    panelClosing = false;
+    if (windowId !== undefined) {
+      chrome.sidePanel.open({ windowId }).catch(() => {});
+    }
+  }, 650);
+  sendPanelMessage({ type: 'closePanel', windowId }).catch(() => {
+    panelOpen = false;
+    panelClosing = false;
+    if (windowId !== undefined) {
+      chrome.sidePanel.open({ windowId }).catch(() => {});
+    }
+  });
+}
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   let url, title;
