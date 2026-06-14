@@ -250,15 +250,46 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-color: transparent;
+  text-underline-offset: 2px;
+  transition: color 0.15s, text-decoration-color 0.15s;
+}
+
+.list-item-source:hover,
+.list-item-source:focus {
+  color: var(--primary);
+  outline: none;
+  text-decoration-color: currentColor;
+}
+
+.list-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.list-item-read {
+  width: 16px;
+  height: 16px;
+  margin: 4px 2px;
+  accent-color: var(--primary);
+  cursor: pointer;
+  flex-shrink: 0;
 }
 
 .list-item-delete {
   background: none;
   border: none;
   color: var(--text-secondary);
-  font-size: 16px;
+  font-size: 14px;
+  line-height: 1;
   cursor: pointer;
-  padding: 4px;
+  width: 24px;
+  height: 24px;
+  padding: 0;
   border-radius: 4px;
   flex-shrink: 0;
   opacity: 0.5;

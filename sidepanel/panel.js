@@ -166,6 +166,19 @@ function renderItem(item) {
   const sourceEl = document.createElement('div');
   sourceEl.className = 'list-item-source';
   sourceEl.textContent = `来源 ${sourceText(item) || '未知'}`;
+  sourceEl.title = item.sourceUrl ? `打开来源：${item.sourceUrl}` : '打开来源';
+  sourceEl.tabIndex = 0;
+  sourceEl.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openSource(item);
+  });
+  sourceEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      e.stopPropagation();
+      openSource(item);
+    }
+  });
   content.appendChild(sourceEl);
 
   // 浏览进度条
@@ -181,25 +194,42 @@ function renderItem(item) {
     content.appendChild(progressContainer);
   }
 
-  const deleteBtn = document.createElement('button');
-  deleteBtn.className = 'list-item-delete';
-  deleteBtn.textContent = '✕';
-  deleteBtn.title = '点击标记已读，右键永久删除';
-  deleteBtn.addEventListener('click', (e) => {
+  const actions = document.createElement('div');
+  actions.className = 'list-item-actions';
+
+  const readCheckbox = document.createElement('input');
+  readCheckbox.className = 'list-item-read';
+  readCheckbox.type = 'checkbox';
+  readCheckbox.checked = !!item.strikethrough;
+  readCheckbox.title = '标记已读';
+  readCheckbox.setAttribute('aria-label', '标记已读');
+  readCheckbox.addEventListener('click', (e) => {
     e.stopPropagation();
     toggleStrikethrough(item.id);
   });
-  deleteBtn.addEventListener('contextmenu', (e) => {
-    e.preventDefault();
+
+  const deleteBtn = document.createElement('button');
+  deleteBtn.className = 'list-item-delete';
+  deleteBtn.textContent = '🗑';
+  deleteBtn.title = '永久删除';
+  deleteBtn.setAttribute('aria-label', '永久删除');
+  deleteBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     if (confirm(`确定永久删除「${item.title}」？`)) {
       deleteItem(item.id);
     }
   });
+  deleteBtn.addEventListener('contextmenu', (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+  });
+
+  actions.appendChild(readCheckbox);
+  actions.appendChild(deleteBtn);
 
   li.appendChild(favicon);
   li.appendChild(content);
-  li.appendChild(deleteBtn);
+  li.appendChild(actions);
 
   li.addEventListener('click', () => openItem(item));
 
@@ -274,6 +304,12 @@ function openItem(item) {
     scrollY: item.scrollY || 0,
     scrollPercent: item.scrollPercent || 0,
   });
+}
+
+function openSource(item) {
+  const url = item.sourceUrl || item.url;
+  if (!url) return;
+  chrome.tabs.create({ url, active: true });
 }
 
 async function deleteItem(id) {
