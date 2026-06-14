@@ -58,23 +58,7 @@ document.addEventListener(
     }
 
     if (result) {
-      // 视觉反馈：把找到的容器边框闪一下绿色
-      if (result.url && !result.url.includes('x.com') && !result.url.includes('twitter.com/home')) {
-        const art = document.querySelector('article, [role="article"]');
-        if (art) {
-          art.style.outline = '3px solid #00ff00';
-          art.style.outlineOffset = '-3px';
-          setTimeout(() => { art.style.outline = ''; }, 1000);
-        }
-      }
-
-      // 同时发送消息和存 storage 双重保险
       chrome.runtime.sendMessage({ type: 'contextUrl', url: result.url, title: result.title || result.url });
-      chrome.storage.local.set({ _pendingContext: { url: result.url, title: result.title || result.url } });
-    } else {
-      // 没找到：闪红色
-      document.body.style.outline = '3px solid #ff0000';
-      setTimeout(() => { document.body.style.outline = ''; }, 500);
     }
   },
   { capture: true }

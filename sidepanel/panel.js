@@ -7,12 +7,25 @@ const elements = {
   footer: document.getElementById('footer'),
   count: document.getElementById('count'),
   addBtn: document.getElementById('addBtn'),
+  searchInput: document.getElementById('searchInput'),
+  filterSelect: document.getElementById('filterSelect'),
+  sortSelect: document.getElementById('sortSelect'),
   clearBtn: document.getElementById('clearBtn'),
   exportBtn: document.getElementById('exportBtn'),
   importBtn: document.getElementById('importBtn'),
   importFileInput: document.getElementById('importFileInput'),
   reloadBtn: document.getElementById('reloadBtn'),
+  toast: document.getElementById('toast'),
 };
+
+const viewState = {
+  list: [],
+  query: '',
+  filter: 'all',
+  sort: 'addedDesc',
+};
+
+let toastTimer = null;
 
 async function getList() {
   const result = await chrome.storage.local.get({ [STORAGE_KEY]: [] });
@@ -44,6 +57,82 @@ function getDomain(url) {
   }
 }
 
+function normalizeUrl(url) {
+  try {
+    const parsed = new URL(url);
+    for (const key of [...parsed.searchParams.keys()]) {
+      if (/^utm_/i.test(key) || ['fbclid', 'gclid', 'mc_cid', 'mc_eid'].includes(key.toLowerCase())) {
+        parsed.searchParams.delete(key);
+      }
+    }
+    if (parsed.pathname !== '/' && parsed.pathname.endsWith('/')) {
+      parsed.pathname = parsed.pathname.slice(0, -1);
+    }
+    return parsed.toString();
+  } catch {
+    return url;
+  }
+}
+
+function sourceText(item) {
+  return item.sourceDomain || getDomain(item.sourceUrl || item.url);
+}
+
+function getProgress(item) {
+  return Math.min(100, Math.max(0, item.scrollPercent || 0));
+}
+
+function showToast(message) {
+  if (!elements.toast) return;
+  elements.toast.textContent = message;
+  elements.toast.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => {
+    elements.toast.classList.remove('show');
+  }, 2200);
+}
+
+function matchesFilter(item) {
+  const progress = getProgress(item);
+  if (viewState.filter === 'unread') return !item.strikethrough;
+  if (viewState.filter === 'read') return !!item.strikethrough;
+  if (viewState.filter === 'inProgress') return progress > 0 && progress < 100;
+  if (viewState.filter === 'complete') return progress >= 100;
+  return true;
+}
+
+function matchesSearch(item) {
+  const query = viewState.query.trim().toLowerCase();
+  if (!query) return true;
+  const haystack = [
+    item.title,
+    item.url,
+    getDomain(item.url),
+    item.sourceTitle,
+    item.sourceUrl,
+    sourceText(item),
+  ].filter(Boolean).join(' ').toLowerCase();
+  return haystack.includes(query);
+}
+
+function sortItems(items) {
+  const sorted = [...items];
+  sorted.sort((a, b) => {
+    if (viewState.sort === 'addedAsc') return (a.addedAt || 0) - (b.addedAt || 0);
+    if (viewState.sort === 'progressDesc') return getProgress(b) - getProgress(a);
+    if (viewState.sort === 'progressAsc') return getProgress(a) - getProgress(b);
+    if (viewState.sort === 'sourceAsc') {
+      return sourceText(a).localeCompare(sourceText(b), 'zh-CN') || (b.addedAt || 0) - (a.addedAt || 0);
+    }
+    return (b.addedAt || 0) - (a.addedAt || 0);
+  });
+  return sorted;
+}
+
+function getVisibleList() {
+  return sortItems(viewState.list.filter(item => matchesFilter(item) && matchesSearch(item)));
+}
+
 function renderItem(item) {
   const li = document.createElement('li');
   li.className = 'list-item';
@@ -73,6 +162,11 @@ function renderItem(item) {
 
   content.appendChild(titleEl);
   content.appendChild(domainEl);
+
+  const sourceEl = document.createElement('div');
+  sourceEl.className = 'list-item-source';
+  sourceEl.textContent = `来源 ${sourceText(item) || '未知'}`;
+  content.appendChild(sourceEl);
 
   // 浏览进度条
   if (item.scrollPercent !== undefined && item.scrollPercent > 0) {
@@ -122,6 +216,12 @@ async function toggleStrikethrough(id) {
 
   item.strikethrough = !item.strikethrough;
   await setList(list);
+  viewState.list = list;
+
+  if (viewState.filter !== 'all') {
+    renderList(list);
+    return;
+  }
 
   const titleEl = li.querySelector('.list-item-title');
 
@@ -160,38 +260,61 @@ async function toggleStrikethrough(id) {
 }
 
 function updateCount() {
-  const n = document.querySelectorAll('.list-item').length;
-  document.getElementById('count').textContent = `共 ${n} 项`;
+  const visibleCount = getVisibleList().length;
+  elements.count.textContent = visibleCount === viewState.list.length
+    ? `共 ${viewState.list.length} 项`
+    : `显示 ${visibleCount} / 共 ${viewState.list.length} 项`;
 }
 
 function openItem(item) {
-  chrome.runtime.sendMessage({ type: 'openItem', url: item.url, itemId: item.id });
+  chrome.runtime.sendMessage({
+    type: 'openItem',
+    url: item.url,
+    itemId: item.id,
+    scrollY: item.scrollY || 0,
+    scrollPercent: item.scrollPercent || 0,
+  });
 }
 
 async function deleteItem(id) {
   const list = await getList();
   const filtered = list.filter(item => item.id !== id);
   await setList(filtered);
-  // 直接移除 DOM 节点，避免全量重绘触发动画重播
-  const li = document.querySelector(`.list-item[data-id="${id}"]`);
-  li?.remove();
-  // 如果列表空了，更新空状态
-  if (filtered.length === 0) {
-    elements.list.innerHTML = '';
-    elements.emptyState.classList.remove('hidden');
-    elements.footer.classList.add('hidden');
-  }
-  updateCount();
+  viewState.list = filtered;
+  renderList();
+  showToast('已删除');
 }
 
-async function renderList(list) {
-  const isEmpty = list.length === 0;
-  elements.list.innerHTML = '';
-  elements.emptyState.classList.toggle('hidden', !isEmpty);
+function updateEmptyState(visibleCount, totalCount) {
+  const isEmpty = totalCount === 0;
+  elements.emptyState.classList.toggle('hidden', !isEmpty && visibleCount > 0);
   elements.footer.classList.toggle('hidden', isEmpty);
-  if (isEmpty) return;
-  list.forEach(item => elements.list.appendChild(renderItem(item)));
-  elements.count.textContent = `共 ${list.length} 项`;
+  if (isEmpty) {
+    elements.emptyState.querySelector('.empty-text').textContent = '暂无内容';
+    elements.emptyState.querySelector('.empty-hint').textContent = '点击上方按钮或右键菜单添加网页';
+    return;
+  }
+  if (visibleCount === 0) {
+    elements.emptyState.querySelector('.empty-text').textContent = '没有匹配项';
+    elements.emptyState.querySelector('.empty-hint').textContent = '换个关键词或筛选条件试试';
+    elements.emptyState.classList.remove('hidden');
+  }
+}
+
+function renderList(list = viewState.list) {
+  viewState.list = list;
+  const visibleList = getVisibleList();
+  const isEmpty = viewState.list.length === 0;
+  elements.list.innerHTML = '';
+  updateEmptyState(visibleList.length, viewState.list.length);
+  if (isEmpty || visibleList.length === 0) {
+    elements.count.textContent = viewState.list.length ? `显示 0 / 共 ${viewState.list.length} 项` : '';
+    return;
+  }
+  visibleList.forEach(item => elements.list.appendChild(renderItem(item)));
+  elements.count.textContent = visibleList.length === viewState.list.length
+    ? `共 ${viewState.list.length} 项`
+    : `显示 ${visibleList.length} / 共 ${viewState.list.length} 项`;
   requestAnimationFrame(splitStrikethroughLines);
 }
 
@@ -243,29 +366,40 @@ function splitStrikethroughLines() {
 async function addCurrentTab() {
   const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
   if (!tab || !tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('edge://')) return;
+  const normalizedUrl = normalizeUrl(tab.url);
   const item = {
     id: Date.now().toString(),
     title: tab.title || tab.url,
     url: tab.url,
+    normalizedUrl,
     favicon: tab.favIconUrl || `https://www.google.com/s2/favicons?domain=${new URL(tab.url).hostname}&sz=32`,
     addedAt: Date.now(),
+    sourceUrl: tab.url,
+    sourceTitle: tab.title || tab.url,
+    sourceDomain: getDomain(tab.url),
   };
   const list = await getList();
-  if (list.some(i => i.url === item.url)) return;
+  const existingIndex = list.findIndex(i => (i.normalizedUrl || normalizeUrl(i.url)) === normalizedUrl);
+  if (existingIndex >= 0) {
+    const [existing] = list.splice(existingIndex, 1);
+    list.unshift(existing);
+    await setList(list);
+    renderList(list);
+    showToast('已在列表中，已移到顶部');
+    return;
+  }
   list.unshift(item);
   await setList(list);
-  // 只追加新元素，不重绘全部
-  elements.emptyState.classList.add('hidden');
-  elements.footer.classList.remove('hidden');
-  elements.list.prepend(renderItem(item));
-  updateCount();
+  renderList(list);
+  showToast('已添加到稍后再看');
 }
 
 async function clearAll() {
-  if (document.querySelectorAll('.list-item').length === 0) return;
+  if (viewState.list.length === 0) return;
   if (!confirm('确定清空全部稍后再看列表？')) return;
   await setList([]);
   renderList([]);
+  showToast('已清空');
 }
 
 async function exportData() {
@@ -287,8 +421,16 @@ async function importData(file) {
     const imported = data.list;
     if (!Array.isArray(imported)) throw new Error();
     const current = await getList();
-    const existingUrls = new Set(current.map(i => i.url));
-    const newItems = imported.filter(i => i.url && !existingUrls.has(i.url));
+    const existingUrls = new Set(current.map(i => i.normalizedUrl || normalizeUrl(i.url)));
+    const newItems = imported
+      .filter(i => i.url && !existingUrls.has(i.normalizedUrl || normalizeUrl(i.url)))
+      .map(i => ({
+        ...i,
+        normalizedUrl: i.normalizedUrl || normalizeUrl(i.url),
+        sourceUrl: i.sourceUrl || i.url,
+        sourceTitle: i.sourceTitle || i.title || i.url,
+        sourceDomain: i.sourceDomain || getDomain(i.sourceUrl || i.url),
+      }));
     const merged = [...newItems, ...current];
     await setList(merged);
     renderList(merged);
@@ -303,6 +445,18 @@ async function init() {
   renderList(list);
 
   elements.addBtn.addEventListener('click', addCurrentTab);
+  elements.searchInput.addEventListener('input', (e) => {
+    viewState.query = e.target.value;
+    renderList();
+  });
+  elements.filterSelect.addEventListener('change', (e) => {
+    viewState.filter = e.target.value;
+    renderList();
+  });
+  elements.sortSelect.addEventListener('change', (e) => {
+    viewState.sort = e.target.value;
+    renderList();
+  });
   elements.clearBtn.addEventListener('click', clearAll);
   elements.exportBtn.addEventListener('click', exportData);
   elements.importBtn.addEventListener('click', () => elements.importFileInput.click());
@@ -322,20 +476,54 @@ async function init() {
       window.close();
     }
     if (msg.type === 'listUpdated') {
-      // 增量更新，不触发全量重绘
       chrome.storage.local.get({ [STORAGE_KEY]: [] }, (result) => {
-        const newList = result[STORAGE_KEY];
-        const existingIds = new Set([...document.querySelectorAll('.list-item')].map(li => li.dataset.id));
-        const toAdd = newList.filter(item => !existingIds.has(item.id));
-        if (toAdd.length > 0) {
-          elements.emptyState.classList.add('hidden');
-          elements.footer.classList.remove('hidden');
-          for (const item of toAdd) {
-            elements.list.prepend(renderItem(item));
-          }
-          updateCount();
-        }
+        renderList(result[STORAGE_KEY]);
+        showToast(msg.title ? `已添加：${msg.title}` : '已添加到稍后再看');
       });
+    }
+    if (msg.type === 'itemDuplicate') {
+      chrome.storage.local.get({ [STORAGE_KEY]: [] }, (result) => {
+        renderList(result[STORAGE_KEY]);
+        showToast('已在列表中，已移到顶部');
+      });
+    }
+    if (msg.type === 'scrollProgressUpdated') {
+      // 实时更新单个项目的进度条，不重绘全部
+      const li = document.querySelector(`.list-item[data-id="${msg.itemId}"]`);
+      if (!li) return;
+      const content = li.querySelector('.list-item-content');
+      const itemInState = viewState.list.find(i => i.id === msg.itemId);
+      if (itemInState) itemInState.scrollPercent = msg.percent;
+      // 更新底部 domain 文字中的百分比
+      const domainEl = li.querySelector('.list-item-domain');
+      if (domainEl) {
+        // 获取当前列表数据重建 domain 文字
+        chrome.storage.local.get({ [STORAGE_KEY]: [] }, (result) => {
+          const item = result[STORAGE_KEY].find(i => i.id === msg.itemId);
+          if (!item) return;
+          const newDomainText = `${getDomain(item.url)} · ${formatTime(item.addedAt)} · ${msg.percent}%`;
+          domainEl.textContent = newDomainText;
+        });
+      }
+      // 更新或创建进度条
+      let progressContainer = li.querySelector('.scroll-progress');
+      const pct = Math.min(100, msg.percent);
+      if (progressContainer) {
+        const bar = progressContainer.querySelector('.scroll-progress-bar');
+        if (bar) {
+          bar.style.width = pct + '%';
+          bar.classList.toggle('complete', pct >= 100);
+        }
+      } else if (pct > 0 && content) {
+        progressContainer = document.createElement('div');
+        progressContainer.className = 'scroll-progress';
+        const progressBar = document.createElement('div');
+        progressBar.className = 'scroll-progress-bar';
+        progressBar.style.width = pct + '%';
+        if (pct >= 100) progressBar.classList.add('complete');
+        progressContainer.appendChild(progressBar);
+        content.appendChild(progressContainer);
+      }
     }
   });
 

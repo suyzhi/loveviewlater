@@ -12,6 +12,25 @@
       <h1 class="title">稍后再看</h1>
       <button id="addBtn" class="btn-primary" title="添加当前页面">+ 添加当前页</button>
     </header>
+    <section class="controls" aria-label="列表筛选与排序">
+      <input id="searchInput" class="search-input" type="search" placeholder="搜索标题、网址或来源">
+      <div class="control-row">
+        <select id="filterSelect" class="control-select" title="筛选">
+          <option value="all">全部</option>
+          <option value="unread">未读</option>
+          <option value="read">已读</option>
+          <option value="inProgress">读到一半</option>
+          <option value="complete">已完成</option>
+        </select>
+        <select id="sortSelect" class="control-select" title="排序">
+          <option value="addedDesc">最新添加</option>
+          <option value="addedAsc">最早添加</option>
+          <option value="progressDesc">进度最多</option>
+          <option value="progressAsc">进度最少</option>
+          <option value="sourceAsc">来源 A-Z</option>
+        </select>
+      </div>
+    </section>
     <div id="emptyState" class="empty-state hidden">
       <div class="empty-icon">📖</div>
       <p class="empty-text">暂无内容</p>
@@ -29,6 +48,7 @@
         <button id="clearBtn" class="btn-danger">清空全部</button>
       </div>
     </footer>
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
     <input type="file" id="importFileInput" accept=".json" class="hidden">
   </div>
   <script src="panel.js"></script>

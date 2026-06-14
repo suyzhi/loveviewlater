@@ -73,6 +73,47 @@ body {
   font-weight: 600;
 }
 
+.controls {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+
+.search-input,
+.control-select {
+  width: 100%;
+  min-height: 32px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+}
+
+.search-input {
+  padding: 6px 9px;
+}
+
+.search-input:focus,
+.control-select:focus {
+  outline: 2px solid rgba(66, 133, 244, 0.25);
+  border-color: var(--primary);
+}
+
+.control-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.control-select {
+  padding: 5px 8px;
+}
+
 .btn-primary {
   background: var(--primary);
   color: #fff;
@@ -202,6 +243,15 @@ body {
   white-space: nowrap;
 }
 
+.list-item-source {
+  margin-top: 1px;
+  font-size: 11px;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .list-item-delete {
   background: none;
   border: none;
@@ -296,6 +346,10 @@ body {
   opacity: 0.4;
 }
 
+.list-item.strikethrough .list-item-source {
+  opacity: 0.4;
+}
+
 .list-item.strikethrough .scroll-progress {
   opacity: 0.3;
 }
@@ -348,6 +402,31 @@ body {
 
 .scroll-progress-bar.complete {
   background: #34a853;
+}
+
+.toast {
+  position: fixed;
+  left: 16px;
+  right: 16px;
+  bottom: 58px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--text);
+  color: var(--bg);
+  box-shadow: var(--shadow);
+  font-size: 12px;
+  line-height: 1.4;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(8px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  z-index: 20;
+}
+
+.toast.show {
+  opacity: 1;
+  transform: translateY(0);
 }
 
 @media (prefers-color-scheme: dark) {
