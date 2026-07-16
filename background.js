@@ -1,59 +1,59 @@
-let panelOpen = false;
-let panelClosing = false;
-let reopenAfterCloseWindowId = null;
-let panelPort = null;
+import {
+  STORAGE_KEY,
+  addOrBumpItem,
+  createSerialExecutor,
+  getDomain,
+  isSupportedUrl,
+  normalizeStoredList,
+  normalizeUrl,
+  prepareImport,
+  urlsReferToSameDocument,
+} from './core.mjs';
 
-const STORAGE_KEY = 'readLaterList';
-const CONTEXT_TTL_MS = 5000;
-
-// tabId -> 追踪状态映射，用于追踪从稍后再看打开的页面
-// 使用 chrome.storage.session 持久化，避免 MV3 SW 重启后丢失
+const CONTEXT_TTL_MS = 30_000;
 const trackedTabs = new Map();
+const pendingContextByTab = new Map();
+const panelStates = new Map();
+const runSerially = createSerialExecutor();
+
+function normalizeTrackedState(state) {
+  if (typeof state === 'string') return { itemId: state };
+  return state && typeof state === 'object' ? state : {};
+}
 
 async function initTrackedTabs() {
   try {
     const result = await chrome.storage.session.get({ trackedTabs: {} });
-    const stored = result.trackedTabs;
-    for (const [tabId, state] of Object.entries(stored)) {
+    for (const [tabId, state] of Object.entries(result.trackedTabs)) {
       trackedTabs.set(Number(tabId), normalizeTrackedState(state));
     }
   } catch {
-    // session storage 不可用（如 Firefox）
+    // 会话存储不可用时仅影响跨 Service Worker 的追踪恢复。
   }
 }
-initTrackedTabs();
 
-function normalizeTrackedState(state) {
-  if (typeof state === 'string') return { itemId: state };
-  return state || {};
+const trackedTabsReady = initTrackedTabs();
+
+async function persistTrackedTabs() {
+  try {
+    await chrome.storage.session.set({ trackedTabs: Object.fromEntries(trackedTabs) });
+  } catch {
+    // 非关键错误。
+  }
 }
 
 async function saveTrackedTab(tabId, state) {
+  if (tabId === undefined) return;
+  await trackedTabsReady;
   trackedTabs.set(tabId, normalizeTrackedState(state));
-  try {
-    const result = await chrome.storage.session.get({ trackedTabs: {} });
-    const stored = result.trackedTabs;
-    stored[tabId] = normalizeTrackedState(state);
-    await chrome.storage.session.set({ trackedTabs: stored });
-  } catch {
-    // 非关键错误，忽略
-  }
+  await persistTrackedTabs();
 }
 
 async function removeTrackedTab(tabId) {
-  trackedTabs.delete(tabId);
-  try {
-    const result = await chrome.storage.session.get({ trackedTabs: {} });
-    const stored = result.trackedTabs;
-    delete stored[tabId];
-    await chrome.storage.session.set({ trackedTabs: stored });
-  } catch {
-    // 非关键错误，忽略
-  }
+  await trackedTabsReady;
+  if (!trackedTabs.delete(tabId)) return;
+  await persistTrackedTabs();
 }
-
-// tabId -> 右键上下文 URL，避免多个标签页快速右键时串台
-const pendingContextByTab = new Map();
 
 function prunePendingContexts() {
   const now = Date.now();
@@ -62,16 +62,9 @@ function prunePendingContexts() {
   }
 }
 
-function getDomain(url) {
-  try {
-    return new URL(url).hostname.replace(/^www\./, '');
-  } catch {
-    return '';
-  }
-}
-
 function buildSource(tab, fallbackUrl) {
-  const sourceUrl = tab?.url || fallbackUrl || '';
+  const candidate = tab?.url || fallbackUrl || '';
+  const sourceUrl = isSupportedUrl(candidate) ? new URL(candidate).toString() : '';
   return {
     sourceUrl,
     sourceTitle: tab?.title || sourceUrl,
@@ -79,191 +72,273 @@ function buildSource(tab, fallbackUrl) {
   };
 }
 
-function normalizeUrl(url) {
+function makeFallbackFavicon(tab, targetUrl) {
+  if (!tab?.favIconUrl || !isSupportedUrl(tab.url) || !isSupportedUrl(targetUrl)) return undefined;
   try {
-    const parsed = new URL(url);
-    for (const key of [...parsed.searchParams.keys()]) {
-      if (/^utm_/i.test(key) || ['fbclid', 'gclid', 'mc_cid', 'mc_eid'].includes(key.toLowerCase())) {
-        parsed.searchParams.delete(key);
-      }
-    }
-    if (parsed.pathname !== '/' && parsed.pathname.endsWith('/')) {
-      parsed.pathname = parsed.pathname.slice(0, -1);
-    }
-    return parsed.toString();
+    return new URL(tab.url).origin === new URL(targetUrl).origin ? tab.favIconUrl : undefined;
   } catch {
-    return url;
+    return undefined;
   }
 }
 
-function notifyPanel(message) {
-  chrome.runtime.sendMessage(message).catch(() => {});
+function buildItem({ url, title, tab, source }) {
+  const now = Date.now();
+  const item = {
+    id: crypto.randomUUID(),
+    title: title || url,
+    url: new URL(url).toString(),
+    normalizedUrl: normalizeUrl(url),
+    addedAt: now,
+    firstAddedAt: now,
+    ...source,
+  };
+  const favicon = makeFallbackFavicon(tab, url);
+  if (favicon) item.favicon = favicon;
+  return item;
 }
 
-function sendPanelMessage(message) {
-  return chrome.runtime.sendMessage(message);
+async function readList() {
+  const result = await chrome.storage.local.get({ [STORAGE_KEY]: [] });
+  return normalizeStoredList(result[STORAGE_KEY]);
 }
 
-function notifyTab(tabId, message) {
-  if (tabId === undefined) return;
-  chrome.tabs.sendMessage(tabId, message).catch(() => {});
+function mutateList(mutator) {
+  return runSerially(async () => {
+    const list = await readList();
+    const outcome = await mutator(list);
+    const nextList = outcome?.list || list;
+    await chrome.storage.local.set({ [STORAGE_KEY]: nextList });
+    return { ...outcome, list: nextList };
+  });
+}
+
+function broadcastPanel(message) {
+  for (const state of panelStates.values()) {
+    try {
+      state.port.postMessage(message);
+    } catch {
+      // 面板可能正在关闭。
+    }
+  }
+}
+
+function broadcastList(outcome, { feedback, originWindowId = null } = {}) {
+  broadcastPanel({ type: 'listUpdated', list: outcome.list, feedback, originWindowId });
 }
 
 function playAddAnimation(tabId, payload) {
   if (tabId === undefined) return;
-  chrome.scripting
-    .executeScript({
-      target: { tabId },
-      func: (animationPayload) => {
-        globalThis.__readLaterAnimationPayload = animationPayload;
-      },
-      args: [payload],
-    })
-    .then(() => chrome.scripting.executeScript({
-      target: { tabId },
-      files: ['content-add-animation.js'],
-    }))
-    .catch(() => {
-      notifyTab(tabId, { type: 'playAddAnimation', ...payload });
-    });
+  chrome.tabs.sendMessage(tabId, {
+    type: 'playAddAnimation',
+    animationId: crypto.randomUUID(),
+    ...payload,
+  }).catch(() => {
+    // 内部页或未获授权页面不支持网页内动画，保存仍然成功。
+  });
 }
 
-function reopenPanelIfRequested() {
-  if (reopenAfterCloseWindowId === null) return;
-  const windowId = reopenAfterCloseWindowId;
-  reopenAfterCloseWindowId = null;
-  chrome.sidePanel.open({ windowId }).catch(() => {});
+function closePanel(windowId) {
+  const state = panelStates.get(windowId);
+  if (!state || state.closing) return;
+  state.closing = true;
+  try {
+    state.port.postMessage({ type: 'closePanel' });
+    setTimeout(() => {
+      if (panelStates.get(windowId) !== state) return;
+      state.closing = false;
+      state.reopen = false;
+    }, 700);
+  } catch {
+    panelStates.delete(windowId);
+  }
 }
 
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'sidePanel') return;
-  panelPort = port;
-  panelOpen = true;
-  panelClosing = false;
-  reopenAfterCloseWindowId = null;
+  let registeredWindowId = null;
+
+  port.onMessage.addListener((message) => {
+    if (message.type !== 'registerPanel' || !Number.isInteger(message.windowId)) return;
+    registeredWindowId = message.windowId;
+    panelStates.set(registeredWindowId, { port, closing: false, reopen: false });
+  });
 
   port.onDisconnect.addListener(() => {
-    if (panelPort === port) panelPort = null;
-    panelOpen = false;
-    panelClosing = false;
-    reopenPanelIfRequested();
+    if (registeredWindowId === null) return;
+    const state = panelStates.get(registeredWindowId);
+    if (state?.port !== port) return;
+    panelStates.delete(registeredWindowId);
+    if (state.reopen) chrome.sidePanel.open({ windowId: registeredWindowId }).catch(() => {});
   });
 });
 
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg.type === 'panelOpened') {
-    panelOpen = true;
-    panelClosing = false;
-    reopenAfterCloseWindowId = null;
-  }
-  if (msg.type === 'panelClosing') {
-    panelClosing = true;
-  }
-  if (msg.type === 'panelClosed') {
-    panelOpen = false;
-    panelClosing = false;
-    reopenPanelIfRequested();
+function respondWith(promise, sendResponse) {
+  promise
+    .then((data) => sendResponse({ ok: true, data }))
+    .catch((error) => sendResponse({ ok: false, error: error?.message || '操作失败' }));
+  return true;
+}
+
+async function handlePanelAction(message) {
+  if (message.type === 'list:get') {
+    const outcome = await mutateList((list) => ({ list }));
+    return { list: outcome.list };
   }
 
-  if (msg.type === 'pageClicked') {
+  if (message.type === 'list:addCurrent') {
+    const query = { active: true };
+    if (Number.isInteger(message.windowId)) query.windowId = message.windowId;
+    else query.currentWindow = true;
+    const [tab] = await chrome.tabs.query(query);
+    if (!tab || !isSupportedUrl(tab.url)) throw new Error('当前页面不支持添加');
+    const source = buildSource(tab, tab.url);
+    const item = buildItem({ url: tab.url, title: tab.title, tab, source });
+    const outcome = await mutateList((list) => addOrBumpItem(list, item));
+    broadcastList(outcome, { originWindowId: message.windowId });
+    playAddAnimation(tab.id, {
+      duplicate: outcome.duplicate,
+      label: outcome.item.title || outcome.item.url,
+    });
+    return { duplicate: outcome.duplicate, item: outcome.item, list: outcome.list };
+  }
+
+  if (message.type === 'list:toggleRead') {
+    const outcome = await mutateList((list) => {
+      const item = list.find((candidate) => candidate.id === message.itemId);
+      if (!item) throw new Error('条目不存在');
+      item.strikethrough = !item.strikethrough;
+      return { list, item };
+    });
+    broadcastList(outcome, { originWindowId: message.windowId });
+    return { item: outcome.item, list: outcome.list };
+  }
+
+  if (message.type === 'list:delete') {
+    const outcome = await mutateList((list) => ({
+      list: list.filter((item) => item.id !== message.itemId),
+    }));
+    broadcastList(outcome, { originWindowId: message.windowId });
+    return { list: outcome.list };
+  }
+
+  if (message.type === 'list:clear') {
+    const outcome = await mutateList(() => ({ list: [] }));
+    broadcastList(outcome, { originWindowId: message.windowId });
+    return { list: outcome.list };
+  }
+
+  if (message.type === 'list:import') {
+    const outcome = await mutateList((list) => prepareImport(message.payload, list));
+    broadcastList(outcome, { originWindowId: message.windowId });
+    return {
+      imported: outcome.imported,
+      duplicate: outcome.duplicate,
+      invalid: outcome.invalid,
+      list: outcome.list,
+    };
+  }
+
+  throw new Error('未知操作');
+}
+
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type?.startsWith('list:')) {
+    return respondWith(handlePanelAction(message), sendResponse);
+  }
+
+  if (message.type === 'pageClicked') {
     const windowId = sender.tab?.windowId;
-    if (panelOpen && !panelClosing) {
-      closePanelWithState(windowId);
-    }
+    if (windowId !== undefined) closePanel(windowId);
   }
 
-  // 从内容脚本：右键点击的 URL
-  if (msg.type === 'contextMeta') {
+  if (message.type === 'contextMeta' || message.type === 'contextUrl') {
     const tabId = sender.tab?.id;
     if (tabId !== undefined) {
-      const existing = pendingContextByTab.get(tabId) || {};
+      const existing = message.type === 'contextUrl' ? (pendingContextByTab.get(tabId) || {}) : {};
       pendingContextByTab.set(tabId, {
         ...existing,
-        x: msg.x,
-        y: msg.y,
-        label: msg.label,
+        url: message.type === 'contextUrl' ? message.url : undefined,
+        title: message.type === 'contextUrl' ? message.title : undefined,
+        label: message.label,
+        x: message.x,
+        y: message.y,
         createdAt: Date.now(),
       });
     }
   }
 
-  if (msg.type === 'contextUrl') {
-    const tabId = sender.tab?.id;
-    if (tabId !== undefined) {
-      const existing = pendingContextByTab.get(tabId) || {};
-      pendingContextByTab.set(tabId, {
-        ...existing,
-        url: msg.url,
-        title: msg.title,
-        x: msg.x ?? existing.x,
-        y: msg.y ?? existing.y,
-        label: msg.label || msg.title || existing.label,
-        createdAt: Date.now(),
-      });
-    }
-  }
-
-  // 从侧边栏：打开一个新标签页并追踪
-  if (msg.type === 'openItem') {
-    chrome.tabs.create({ url: msg.url, active: true }, (tab) => {
+  if (message.type === 'openItem') {
+    if (!isSupportedUrl(message.url)) return;
+    chrome.tabs.create({ url: message.url, active: true }, (tab) => {
+      if (!tab?.id) return;
       saveTrackedTab(tab.id, {
-        itemId: msg.itemId,
-        restoreScrollY: msg.scrollY,
-        restorePercent: msg.scrollPercent,
+        itemId: message.itemId,
+        expectedUrl: message.url,
+        boundUrl: null,
+        restoreScrollY: message.scrollY,
+        restorePercent: message.scrollPercent,
       });
     });
   }
 
-  // 从内容脚本：更新滚动百分比
-  if (msg.type === 'scrollUpdate' && sender.tab) {
-    const state = normalizeTrackedState(trackedTabs.get(sender.tab.id));
-    const itemId = state.itemId;
-    if (itemId && msg.percent !== undefined) {
-      chrome.storage.local.get({ [STORAGE_KEY]: [] }, (result) => {
-        const list = result[STORAGE_KEY];
-        const item = list.find((i) => i.id === itemId);
-        if (item) {
-          item.scrollPercent = Math.max(item.scrollPercent || 0, msg.percent);
-          item.scrollY = Math.max(0, Math.round(msg.scrollY || 0));
-          item.scrollUpdatedAt = Date.now();
-          chrome.storage.local.set({ [STORAGE_KEY]: list });
-          notifyPanel({ type: 'scrollProgressUpdated', itemId, percent: item.scrollPercent });
-        }
+  if (message.type === 'scrollUpdate' && sender.tab?.id !== undefined) {
+    trackedTabsReady.then(() => {
+      const state = normalizeTrackedState(trackedTabs.get(sender.tab.id));
+      if (!state.itemId || !state.boundUrl || !urlsReferToSameDocument(state.boundUrl, message.pageUrl)) return;
+      return mutateList((list) => {
+        const item = list.find((candidate) => candidate.id === state.itemId);
+        if (!item) return { list, item: null };
+        item.scrollPercent = Math.max(item.scrollPercent || 0, Number(message.percent) || 0);
+        item.scrollY = Math.max(0, Math.round(Number(message.scrollY) || 0));
+        item.scrollUpdatedAt = Date.now();
+        return { list, item };
+      }).then((outcome) => {
+        if (!outcome.item) return;
+        broadcastPanel({
+          type: 'scrollProgressUpdated',
+          itemId: outcome.item.id,
+          percent: outcome.item.scrollPercent,
+          scrollY: outcome.item.scrollY,
+        });
       });
-    }
+    }).catch(() => {});
   }
 });
 
-// 标签页加载完成后注入滚动追踪脚本
-chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  if (changeInfo.status === 'complete' && trackedTabs.has(tabId)) {
-    injectScrollTracker(tabId);
-  }
-});
-
-// 标签页关闭时清理映射
-chrome.tabs.onRemoved.addListener((tabId) => {
-  removeTrackedTab(tabId);
-});
-
-function injectScrollTracker(tabId) {
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  await trackedTabsReady;
   const state = normalizeTrackedState(trackedTabs.get(tabId));
-  chrome.scripting
-    .executeScript({
-      target: { tabId },
-      func: (restore) => {
-        window.__readLaterRestore = restore;
-      },
-      args: [{ scrollY: state.restoreScrollY || 0, percent: state.restorePercent || 0 }],
-    })
-    .then(() => chrome.scripting.executeScript({
-      target: { tabId },
-      files: ['content-scroll-tracker.js'],
-    }))
-    .catch(() => {
-      // 受限页面（chrome:// 等）或标签页已关闭
-      removeTrackedTab(tabId);
-    });
+  if (!state.itemId) return;
+
+  if (state.boundUrl && changeInfo.url && !urlsReferToSameDocument(state.boundUrl, changeInfo.url)) {
+    removeTrackedTab(tabId);
+    return;
+  }
+
+  if (changeInfo.status !== 'complete' || !isSupportedUrl(tab.url)) return;
+  if (!state.boundUrl) {
+    state.boundUrl = tab.url;
+    saveTrackedTab(tabId, state);
+  } else if (!urlsReferToSameDocument(state.boundUrl, tab.url)) {
+    removeTrackedTab(tabId);
+    return;
+  }
+  injectScrollTracker(tabId, state);
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => removeTrackedTab(tabId));
+
+function injectScrollTracker(tabId, state) {
+  chrome.scripting.executeScript({
+    target: { tabId },
+    func: (restore) => {
+      window.__readLaterRestore = restore;
+    },
+    args: [{ scrollY: state.restoreScrollY || 0, percent: state.restorePercent || 0 }],
+  }).then(() => chrome.scripting.executeScript({
+    target: { tabId },
+    files: ['content-scroll-tracker.js'],
+  })).catch(() => removeTrackedTab(tabId));
 }
 
 function ensureContextMenu() {
@@ -271,10 +346,7 @@ function ensureContextMenu() {
     id: 'addToReadLater',
     title: '添加到稍后再看',
     contexts: ['all'],
-  }, () => {
-    // 重复创建同一个菜单 ID 时 Chrome 会设置 lastError；菜单已存在即可。
-    chrome.runtime.lastError;
-  });
+  }, () => chrome.runtime.lastError);
 }
 
 function resetContextMenu() {
@@ -286,124 +358,59 @@ chrome.runtime.onInstalled.addListener(resetContextMenu);
 chrome.runtime.onStartup.addListener(ensureContextMenu);
 
 chrome.action.onClicked.addListener((tab) => {
-  if (panelOpen) {
-    if (panelClosing) {
-      reopenAfterCloseWindowId = tab.windowId;
-      return;
-    }
-    closePanelWithState(tab.windowId);
-  } else {
+  const state = panelStates.get(tab.windowId);
+  if (!state) {
     chrome.sidePanel.open({ windowId: tab.windowId }).catch(() => {});
-  }
-});
-
-function closePanelWithState(windowId) {
-  if (!panelPort) {
-    panelOpen = false;
-    panelClosing = false;
-    if (windowId !== undefined) {
-      chrome.sidePanel.open({ windowId }).catch(() => {});
-    }
     return;
   }
-
-  panelClosing = true;
-  reopenAfterCloseWindowId = null;
-  setTimeout(() => {
-    if (!panelClosing) return;
-    panelOpen = false;
-    panelClosing = false;
-    if (windowId !== undefined) {
-      chrome.sidePanel.open({ windowId }).catch(() => {});
-    }
-  }, 650);
-  sendPanelMessage({ type: 'closePanel', windowId }).catch(() => {
-    panelOpen = false;
-    panelClosing = false;
-    if (windowId !== undefined) {
-      chrome.sidePanel.open({ windowId }).catch(() => {});
-    }
-  });
-}
+  if (state.closing) {
+    state.reopen = true;
+    return;
+  }
+  closePanel(tab.windowId);
+});
 
 chrome.contextMenus.onClicked.addListener((info, tab) => {
-  let url, title;
   prunePendingContexts();
-  const pendingContext = tab?.id !== undefined ? pendingContextByTab.get(tab.id) : null;
+  const pending = tab?.id !== undefined ? pendingContextByTab.get(tab.id) : null;
+  let url;
+  let title;
 
-  // 优先使用内容脚本发来的帖子 URL（处理 SPA 网站）
-  if (pendingContext?.url) {
-    url = pendingContext.url;
-    title = info.selectionText || pendingContext.title || url;
-    pendingContextByTab.delete(tab.id);
+  if (pending?.url) {
+    url = pending.url;
+    title = info.selectionText || pending.title || url;
   } else if (info.linkUrl) {
-    // 右键的是链接
     url = info.linkUrl;
     title = info.selectionText || info.linkUrl;
   } else if (info.srcUrl) {
-    // 右键的是图片/视频/音频
     url = info.srcUrl;
     try {
-      const name = new URL(url).pathname.split('/').pop() || url;
-      title = decodeURIComponent(name);
+      title = decodeURIComponent(new URL(url).pathname.split('/').pop() || url);
     } catch {
       title = url;
     }
   } else if (info.selectionText) {
-    // 选中的文字
     url = tab?.url || info.pageUrl;
     title = info.selectionText;
-  } else if (tab) {
-    // 页面空白处
-    url = tab.url;
-    title = tab.title || url;
+  } else {
+    url = tab?.url;
+    title = tab?.title || url;
   }
 
-  if (!url) return;
   if (tab?.id !== undefined) pendingContextByTab.delete(tab.id);
-  const normalizedUrl = normalizeUrl(url);
+  if (!isSupportedUrl(url)) return;
+
   const source = buildSource(tab, info.pageUrl);
-
-  const item = {
-    id: Date.now().toString(),
-    title: title,
-    url: url,
-    normalizedUrl,
-    favicon: `https://www.google.com/s2/favicons?domain=${new URL(url).hostname}&sz=32`,
-    addedAt: Date.now(),
-    ...source,
-  };
-
-  chrome.storage.local.get({ [STORAGE_KEY]: [] }, (result) => {
-    const list = result[STORAGE_KEY];
-    const existingIndex = list.findIndex((i) => (i.normalizedUrl || normalizeUrl(i.url)) === item.normalizedUrl);
-    if (existingIndex >= 0) {
-      const [existing] = list.splice(existingIndex, 1);
-      list.unshift(existing);
-      chrome.storage.local.set({ [STORAGE_KEY]: list }, () => {
-        notifyPanel({ type: 'itemDuplicate', itemId: existing.id, title: existing.title || existing.url });
-        playAddAnimation(tab?.id, {
-          duplicate: true,
-          context: pendingContext,
-          title: existing.title || existing.url,
-          label: existing.title || existing.url,
-          x: pendingContext?.x,
-          y: pendingContext?.y,
-        });
-      });
-      return;
-    }
-    list.unshift(item);
-    chrome.storage.local.set({ [STORAGE_KEY]: list }, () => {
-      // 通知侧边栏刷新
-      notifyPanel({ type: 'listUpdated', title: item.title || item.url });
-      playAddAnimation(tab?.id, {
-        context: pendingContext,
-        title: item.title || item.url,
-        label: item.title || item.url,
-        x: pendingContext?.x,
-        y: pendingContext?.y,
-      });
+  const item = buildItem({ url, title, tab, source });
+  mutateList((list) => addOrBumpItem(list, item)).then((outcome) => {
+    broadcastList(outcome, { feedback: outcome.duplicate
+      ? '已在列表中，已移到顶部'
+      : `已添加：${outcome.item.title || outcome.item.url}` });
+    playAddAnimation(tab?.id, {
+      duplicate: outcome.duplicate,
+      label: outcome.item.title || outcome.item.url,
+      x: pending?.x,
+      y: pending?.y,
     });
-  });
+  }).catch(() => {});
 });

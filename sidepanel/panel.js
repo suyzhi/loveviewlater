@@ -1,4 +1,9 @@
-const STORAGE_KEY = 'readLaterList';
+import {
+  EXPORT_VERSION,
+  IMPORT_MAX_BYTES,
+  getDomain,
+} from '../core.mjs';
+
 const processedAnimations = new Set();
 
 const elements = {
@@ -32,14 +37,17 @@ let listResizeObserver = null;
 let resizeAnimationFrame = null;
 let closingPanel = false;
 let panelPort = null;
+let panelWindowId = null;
 
 async function getList() {
-  const result = await chrome.storage.local.get({ [STORAGE_KEY]: [] });
-  return result[STORAGE_KEY];
+  const result = await sendAction('list:get');
+  return result.list;
 }
 
-async function setList(list) {
-  await chrome.storage.local.set({ [STORAGE_KEY]: list });
+async function sendAction(type, payload = {}) {
+  const response = await chrome.runtime.sendMessage({ type, ...payload });
+  if (!response?.ok) throw new Error(response?.error || '操作失败');
+  return response.data;
 }
 
 function formatTime(ts) {
@@ -53,31 +61,6 @@ function formatTime(ts) {
   const days = Math.floor(hours / 24);
   if (days < 30) return `${days}天前`;
   return new Date(ts).toLocaleDateString('zh-CN');
-}
-
-function getDomain(url) {
-  try {
-    return new URL(url).hostname.replace(/^www\./, '');
-  } catch {
-    return url;
-  }
-}
-
-function normalizeUrl(url) {
-  try {
-    const parsed = new URL(url);
-    for (const key of [...parsed.searchParams.keys()]) {
-      if (/^utm_/i.test(key) || ['fbclid', 'gclid', 'mc_cid', 'mc_eid'].includes(key.toLowerCase())) {
-        parsed.searchParams.delete(key);
-      }
-    }
-    if (parsed.pathname !== '/' && parsed.pathname.endsWith('/')) {
-      parsed.pathname = parsed.pathname.slice(0, -1);
-    }
-    return parsed.toString();
-  } catch {
-    return url;
-  }
 }
 
 function sourceText(item) {
@@ -107,13 +90,11 @@ function closePanelWithAnimation() {
   app.getBoundingClientRect();
   app.classList.add('collapse-out');
   app.style.width = '0px';
-  chrome.runtime.sendMessage({ type: 'panelClosing' }).catch(() => {});
 
   let closed = false;
   const finishClose = () => {
     if (closed) return;
     closed = true;
-    chrome.runtime.sendMessage({ type: 'panelClosed' }).catch(() => {});
     window.close();
   };
   const handleTransitionEnd = (e) => {
@@ -284,10 +265,20 @@ function renderItem(item) {
   if (item.strikethrough) li.classList.add('strikethrough');
   li.dataset.id = item.id;
 
-  const favicon = document.createElement('img');
-  favicon.className = 'list-item-favicon';
-  favicon.src = item.favicon || `https://www.google.com/s2/favicons?domain=${getDomain(item.url)}&sz=32`;
-  favicon.onerror = () => { favicon.src = ''; favicon.style.display = 'none'; };
+  const favicon = item.favicon ? document.createElement('img') : document.createElement('span');
+  favicon.className = item.favicon ? 'list-item-favicon' : 'list-item-favicon list-item-favicon-fallback';
+  if (item.favicon) {
+    favicon.src = item.favicon;
+    favicon.alt = '';
+    favicon.onerror = () => {
+      const fallback = document.createElement('span');
+      fallback.className = 'list-item-favicon list-item-favicon-fallback';
+      fallback.textContent = (getDomain(item.url)[0] || '?').toUpperCase();
+      favicon.replaceWith(fallback);
+    };
+  } else {
+    favicon.textContent = (getDomain(item.url)[0] || '?').toUpperCase();
+  }
 
   const content = document.createElement('div');
   content.className = 'list-item-content';
@@ -396,19 +387,17 @@ function renderItem(item) {
 }
 
 async function toggleStrikethrough(id) {
-  const list = await getList();
-  const item = list.find(i => i.id === id);
+  const result = await sendAction('list:toggleRead', { itemId: id, windowId: panelWindowId });
+  const item = result.item;
   if (!item) return;
 
-  const li = document.querySelector(`.list-item[data-id="${id}"]`);
+  const li = document.querySelector(`.list-item[data-id="${CSS.escape(id)}"]`);
   if (!li) return;
 
-  item.strikethrough = !item.strikethrough;
-  await setList(list);
-  viewState.list = list;
+  viewState.list = result.list;
 
   if (viewState.filter !== 'all') {
-    renderList(list);
+    renderList(result.list);
     return;
   }
 
@@ -508,11 +497,9 @@ function openSource(item) {
 }
 
 async function deleteItem(id) {
-  const list = await getList();
-  const filtered = list.filter(item => item.id !== id);
-  await setList(filtered);
-  viewState.list = filtered;
-  renderList();
+  const result = await sendAction('list:delete', { itemId: id, windowId: panelWindowId });
+  viewState.list = result.list;
+  renderList(result.list);
   showToast('已删除');
 }
 
@@ -598,48 +585,27 @@ function splitStrikethroughLines() {
 }
 
 async function addCurrentTab() {
-  const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  if (!tab || !tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('edge://')) return;
-  const normalizedUrl = normalizeUrl(tab.url);
-  const item = {
-    id: Date.now().toString(),
-    title: tab.title || tab.url,
-    url: tab.url,
-    normalizedUrl,
-    favicon: tab.favIconUrl || `https://www.google.com/s2/favicons?domain=${new URL(tab.url).hostname}&sz=32`,
-    addedAt: Date.now(),
-    sourceUrl: tab.url,
-    sourceTitle: tab.title || tab.url,
-    sourceDomain: getDomain(tab.url),
-  };
-  const list = await getList();
-  const existingIndex = list.findIndex(i => (i.normalizedUrl || normalizeUrl(i.url)) === normalizedUrl);
-  if (existingIndex >= 0) {
-    const [existing] = list.splice(existingIndex, 1);
-    list.unshift(existing);
-    await setList(list);
-    renderList(list);
-    showToast('已在列表中，已移到顶部');
-    return;
+  try {
+    const result = await sendAction('list:addCurrent', { windowId: panelWindowId });
+    renderList(result.list);
+    showToast(result.duplicate ? '已在列表中，已移到顶部' : '已添加到稍后再看');
+  } catch (error) {
+    showToast(error.message);
   }
-  list.unshift(item);
-  await setList(list);
-  renderList(list);
-  showToast('已添加到稍后再看');
 }
 
 async function clearAll() {
   if (viewState.list.length === 0) return;
   if (!confirm('确定清空全部稍后再看列表？')) return;
-  await setList([]);
-  renderList([]);
+  const result = await sendAction('list:clear', { windowId: panelWindowId });
+  renderList(result.list);
   showToast('已清空');
 }
 
 async function exportData() {
   const list = await getList();
   if (list.length === 0) { alert('列表为空，无需导出'); return; }
-  const blob = new Blob([JSON.stringify({ version: 1, exportedAt: Date.now(), list }, null, 2)], { type: 'application/json' });
+  const blob = new Blob([JSON.stringify({ version: EXPORT_VERSION, exportedAt: Date.now(), list }, null, 2)], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;
@@ -650,32 +616,75 @@ async function exportData() {
 
 async function importData(file) {
   try {
+    if (file.size > IMPORT_MAX_BYTES) throw new Error('备份文件不能超过 5 MB');
     const text = await file.text();
     const data = JSON.parse(text);
-    const imported = data.list;
-    if (!Array.isArray(imported)) throw new Error();
-    const current = await getList();
-    const existingUrls = new Set(current.map(i => i.normalizedUrl || normalizeUrl(i.url)));
-    const newItems = imported
-      .filter(i => i.url && !existingUrls.has(i.normalizedUrl || normalizeUrl(i.url)))
-      .map(i => ({
-        ...i,
-        normalizedUrl: i.normalizedUrl || normalizeUrl(i.url),
-        sourceUrl: i.sourceUrl || i.url,
-        sourceTitle: i.sourceTitle || i.title || i.url,
-        sourceDomain: i.sourceDomain || getDomain(i.sourceUrl || i.url),
-      }));
-    const merged = [...newItems, ...current];
-    await setList(merged);
-    renderList(merged);
-    alert(`导入成功！新增 ${newItems.length} 项${newItems.length !== imported.length ? `，跳过 ${imported.length - newItems.length} 项重复` : ''}`);
-  } catch {
-    alert('导入失败：文件格式不正确');
+    const result = await sendAction('list:import', { payload: data, windowId: panelWindowId });
+    renderList(result.list);
+    alert(`导入完成：新增 ${result.imported} 项，重复 ${result.duplicate} 项，无效 ${result.invalid} 项`);
+  } catch (error) {
+    alert(`导入失败：${error.message || '文件格式不正确'}`);
+  }
+}
+
+function handlePanelMessage(msg) {
+  if (msg.type === 'closePanel') {
+    closePanelWithAnimation();
+  }
+  if (msg.type === 'listUpdated') {
+    if (msg.originWindowId === null || msg.originWindowId !== panelWindowId) renderList(msg.list || []);
+    if (msg.feedback) showToast(msg.feedback);
+  }
+  if (msg.type !== 'scrollProgressUpdated') return;
+
+  const itemInState = viewState.list.find(i => i.id === msg.itemId);
+  if (itemInState) {
+    itemInState.scrollPercent = msg.percent;
+    itemInState.scrollY = msg.scrollY;
+  }
+  const progressSensitiveView = ['inProgress', 'complete'].includes(viewState.filter)
+    || ['progressAsc', 'progressDesc'].includes(viewState.sort);
+  if (progressSensitiveView) {
+    renderList();
+    return;
+  }
+
+  // 普通视图只更新单个项目，避免滚动时频繁重绘。
+  const li = document.querySelector(`.list-item[data-id="${CSS.escape(msg.itemId)}"]`);
+  if (!li) return;
+  const content = li.querySelector('.list-item-content');
+  const domainEl = li.querySelector('.list-item-domain');
+  if (domainEl && itemInState) {
+    domainEl.textContent = `${getDomain(itemInState.url)} · ${formatTime(itemInState.addedAt)} · ${msg.percent}%`;
+  }
+  let progressContainer = li.querySelector('.scroll-progress');
+  const pct = Math.min(100, msg.percent);
+  if (progressContainer) {
+    const bar = progressContainer.querySelector('.scroll-progress-bar');
+    if (bar) {
+      bar.style.width = pct + '%';
+      bar.classList.toggle('complete', pct >= 100);
+    }
+  } else if (pct > 0 && content) {
+    progressContainer = document.createElement('div');
+    progressContainer.className = 'scroll-progress';
+    const progressBar = document.createElement('div');
+    progressBar.className = 'scroll-progress-bar';
+    progressBar.style.width = pct + '%';
+    if (pct >= 100) progressBar.classList.add('complete');
+    progressContainer.appendChild(progressBar);
+    content.appendChild(progressContainer);
   }
 }
 
 async function init() {
+  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+  panelWindowId = activeTab?.windowId ?? null;
   panelPort = chrome.runtime.connect({ name: 'sidePanel' });
+  if (Number.isInteger(panelWindowId)) {
+    panelPort.postMessage({ type: 'registerPanel', windowId: panelWindowId });
+  }
+  panelPort.onMessage.addListener(handlePanelMessage);
   const list = await getList();
   renderList(list);
 
@@ -705,67 +714,6 @@ async function init() {
     if (e.target.files[0]) { importData(e.target.files[0]); e.target.value = ''; }
   });
 
-  chrome.runtime.sendMessage({ type: 'panelOpened' });
-
-  chrome.runtime.onMessage.addListener((msg) => {
-    if (msg.type === 'closePanel') {
-      closePanelWithAnimation();
-    }
-    if (msg.type === 'listUpdated') {
-      chrome.storage.local.get({ [STORAGE_KEY]: [] }, (result) => {
-        renderList(result[STORAGE_KEY]);
-        showToast(msg.title ? `已添加：${msg.title}` : '已添加到稍后再看');
-      });
-    }
-    if (msg.type === 'itemDuplicate') {
-      chrome.storage.local.get({ [STORAGE_KEY]: [] }, (result) => {
-        renderList(result[STORAGE_KEY]);
-        showToast('已在列表中，已移到顶部');
-      });
-    }
-    if (msg.type === 'scrollProgressUpdated') {
-      // 实时更新单个项目的进度条，不重绘全部
-      const li = document.querySelector(`.list-item[data-id="${msg.itemId}"]`);
-      if (!li) return;
-      const content = li.querySelector('.list-item-content');
-      const itemInState = viewState.list.find(i => i.id === msg.itemId);
-      if (itemInState) itemInState.scrollPercent = msg.percent;
-      // 更新底部 domain 文字中的百分比
-      const domainEl = li.querySelector('.list-item-domain');
-      if (domainEl) {
-        // 获取当前列表数据重建 domain 文字
-        chrome.storage.local.get({ [STORAGE_KEY]: [] }, (result) => {
-          const item = result[STORAGE_KEY].find(i => i.id === msg.itemId);
-          if (!item) return;
-          const newDomainText = `${getDomain(item.url)} · ${formatTime(item.addedAt)} · ${msg.percent}%`;
-          domainEl.textContent = newDomainText;
-        });
-      }
-      // 更新或创建进度条
-      let progressContainer = li.querySelector('.scroll-progress');
-      const pct = Math.min(100, msg.percent);
-      if (progressContainer) {
-        const bar = progressContainer.querySelector('.scroll-progress-bar');
-        if (bar) {
-          bar.style.width = pct + '%';
-          bar.classList.toggle('complete', pct >= 100);
-        }
-      } else if (pct > 0 && content) {
-        progressContainer = document.createElement('div');
-        progressContainer.className = 'scroll-progress';
-        const progressBar = document.createElement('div');
-        progressBar.className = 'scroll-progress-bar';
-        progressBar.style.width = pct + '%';
-        if (pct >= 100) progressBar.classList.add('complete');
-        progressContainer.appendChild(progressBar);
-        content.appendChild(progressContainer);
-      }
-    }
-  });
-
-  window.addEventListener('pagehide', () => {
-    chrome.runtime.sendMessage({ type: 'panelClosed' }).catch(() => {});
-  });
 }
 
 document.addEventListener('DOMContentLoaded', init);

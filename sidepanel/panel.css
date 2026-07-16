@@ -236,6 +236,18 @@ body {
   border-radius: 2px;
 }
 
+.list-item-favicon-fallback {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-hover);
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 9px;
+  font-weight: 700;
+  line-height: 1;
+}
+
 .list-item-content {
   flex: 1;
   min-width: 0;

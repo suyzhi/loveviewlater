@@ -59,7 +59,7 @@ document.addEventListener(
         const d = Math.abs(e.clientX - (r.left + r.width / 2)) + Math.abs(e.clientY - (r.top + r.height / 2));
         if (d < bestDist) { bestDist = d; best = art; }
       }
-      if (best) {
+      if (best && bestDist <= 160) {
         const link = findPostUrl(best);
         if (link) { result = { url: link, title: extractFullText(best) }; }
       }

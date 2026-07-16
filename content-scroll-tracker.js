@@ -27,6 +27,7 @@
           type: 'scrollUpdate',
           percent: maxScrollPercent,
           scrollY: window.scrollY,
+          pageUrl: window.location.href,
         });
       } catch (e) {
         // 扩展上下文可能已销毁
