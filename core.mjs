@@ -1,6 +1,7 @@
 export const STORAGE_KEY = 'readLaterList';
 export const EXPORT_VERSION = 2;
 export const IMPORT_MAX_BYTES = 5 * 1024 * 1024;
+export const RANDOM_PICK_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
 
 const TRACKING_PARAMS = new Set(['fbclid', 'gclid', 'mc_cid', 'mc_eid']);
 const SAFE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
@@ -122,6 +123,8 @@ export function normalizeStoredList(rawList, {
     else delete item.scrollPercent;
     if (Number.isFinite(raw.scrollY)) item.scrollY = Math.max(0, Math.round(raw.scrollY));
     else delete item.scrollY;
+    if (validTimestamp(raw.lastRandomPickedAt)) item.lastRandomPickedAt = raw.lastRandomPickedAt;
+    else delete item.lastRandomPickedAt;
     if (typeof raw.strikethrough !== 'boolean') delete item.strikethrough;
     normalized.push(item);
   }
@@ -141,6 +144,50 @@ export function addOrBumpItem(list, item, now = Date.now()) {
   return { list, item, duplicate: false };
 }
 
+export function getRandomPickPool(list, {
+  now = Date.now(),
+  cooldownMs = RANDOM_PICK_COOLDOWN_MS,
+  excludeIds = new Set(),
+} = {}) {
+  return list.filter((item) => {
+    if (!item || excludeIds.has(item.id) || item.strikethrough) return false;
+    if (Number(item.scrollPercent) >= 100) return false;
+    if (validTimestamp(item.lastRandomPickedAt) && now - item.lastRandomPickedAt < cooldownMs) return false;
+    return true;
+  });
+}
+
+export function pickWeightedOldItems(list, {
+  count = 3,
+  now = Date.now(),
+  cooldownMs = RANDOM_PICK_COOLDOWN_MS,
+  excludeIds = new Set(),
+  random = Math.random,
+} = {}) {
+  const pool = getRandomPickPool(list, { now, cooldownMs, excludeIds });
+  const picked = [];
+
+  while (pool.length > 0 && picked.length < count) {
+    const weights = pool.map((item) => {
+      const firstAddedAt = validTimestamp(item.firstAddedAt) ? item.firstAddedAt : item.addedAt;
+      const ageDays = Math.max(0, (now - firstAddedAt) / (24 * 60 * 60 * 1000));
+      return 1 + Math.min(ageDays, 365) / 30;
+    });
+    const totalWeight = weights.reduce((sum, weight) => sum + weight, 0);
+    let cursor = Math.min(0.999999999, Math.max(0, random())) * totalWeight;
+    let selectedIndex = pool.length - 1;
+    for (let index = 0; index < pool.length; index++) {
+      cursor -= weights[index];
+      if (cursor < 0) {
+        selectedIndex = index;
+        break;
+      }
+    }
+    picked.push(pool.splice(selectedIndex, 1)[0]);
+  }
+  return picked;
+}
+
 function validateImportItem(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
   if (!isSupportedUrl(raw.url) || !validTimestamp(raw.addedAt)) return false;
@@ -150,6 +197,7 @@ function validateImportItem(raw) {
   if (raw.sourceUrl !== undefined && !isSupportedUrl(raw.sourceUrl)) return false;
   if (raw.scrollPercent !== undefined && !Number.isFinite(raw.scrollPercent)) return false;
   if (raw.scrollY !== undefined && !Number.isFinite(raw.scrollY)) return false;
+  if (raw.lastRandomPickedAt !== undefined && !validTimestamp(raw.lastRandomPickedAt)) return false;
   return true;
 }
 

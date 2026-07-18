@@ -46,16 +46,20 @@ body {
 }
 
 #app {
+  position: relative;
   display: flex;
   flex-direction: column;
   width: 100vw;
   min-width: 0;
   height: 100vh;
   overflow: hidden;
-  animation: slideIn 0.25s cubic-bezier(.2,.8,.2,1);
   transition:
     width 0.42s cubic-bezier(.4,0,.2,1),
     opacity 0.24s ease;
+}
+
+#app.panel-enter {
+  animation: slideIn 0.25s cubic-bezier(.2,.8,.2,1);
 }
 
 #app.collapse-out {
@@ -72,6 +76,14 @@ body {
   top: 0;
   background: var(--bg);
   z-index: 10;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
 }
 
 .title {
@@ -136,6 +148,30 @@ body {
   background: var(--primary-hover);
 }
 
+.btn-random {
+  background: var(--bg);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 9px;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.16s ease, border-color 0.16s ease, background 0.16s ease;
+}
+
+.btn-random:hover {
+  color: var(--primary);
+  border-color: var(--primary);
+  background: rgba(66, 133, 244, 0.08);
+}
+
+.btn-primary:disabled,
+.btn-random:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .btn-danger {
   background: transparent;
   color: var(--danger);
@@ -166,6 +202,170 @@ body {
 .btn-outline:hover {
   border-color: var(--primary);
   background: rgba(66, 133, 244, 0.08);
+}
+
+.random-picker {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 18px 16px 16px;
+  overflow-y: auto;
+  background:
+    radial-gradient(circle at 88% 4%, rgba(66, 133, 244, 0.12), transparent 34%),
+    var(--bg);
+  opacity: 0;
+  transform: scale(0.985);
+  transform-origin: top right;
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.random-picker.show {
+  opacity: 1;
+  transform: scale(1);
+}
+
+.random-picker-header,
+.random-picker-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.random-picker-header h2 {
+  font-size: 18px;
+  line-height: 1.25;
+}
+
+.random-picker-header p {
+  margin-top: 3px;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+
+.random-close {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--bg);
+  color: var(--text-secondary);
+  font-size: 22px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.random-cards {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  justify-content: center;
+  gap: 10px;
+}
+
+@keyframes dealRandomCard {
+  from { opacity: 0; transform: translateY(14px) rotate(1.2deg); }
+  to { opacity: 1; transform: translateY(0) rotate(0); }
+}
+
+.random-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: 32px minmax(0, 1fr);
+  gap: 4px 10px;
+  width: 100%;
+  padding: 14px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-hover);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  box-shadow: var(--shadow);
+  opacity: 0;
+  animation: dealRandomCard 0.34s cubic-bezier(.2,.8,.2,1) var(--deal-delay) forwards;
+  transition: border-color 0.16s, transform 0.16s, box-shadow 0.16s;
+}
+
+.random-card:hover,
+.random-card:focus-visible {
+  border-color: var(--primary);
+  outline: none;
+  transform: translateY(-2px);
+  box-shadow: 0 8px 22px rgba(66, 133, 244, 0.14);
+}
+
+.random-card-number {
+  grid-row: 1 / 4;
+  color: var(--primary);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.random-card-title {
+  display: -webkit-box;
+  overflow: hidden;
+  font-size: 13px;
+  line-height: 1.45;
+  word-break: break-word;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.random-card-meta {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.random-card-action {
+  margin-top: 4px;
+  color: var(--primary);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.random-empty {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 32px 18px;
+  text-align: center;
+}
+
+.random-error {
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--danger) 8%, var(--bg));
+  color: var(--danger);
+  font-size: 11px;
+}
+
+.random-empty div {
+  font-size: 42px;
+}
+
+.random-empty span,
+.random-picker-footer span {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.random-picker-footer {
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
 }
 
 .empty-state {
@@ -254,10 +454,13 @@ body {
 }
 
 .list-item-title {
+  display: inline;
   font-size: 13px;
   font-weight: 500;
   word-break: break-word;
   line-height: 1.4;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
 }
 
 .list-item-domain {
@@ -382,7 +585,7 @@ body {
   opacity: 0.5;
 }
 
-.list-item.strikethrough .list-item-title:not(:has(> span)) {
+.list-item.strikethrough .list-item-title {
   background-image: linear-gradient(
     to bottom,
     transparent calc(0.6em - 0.5px),
@@ -394,20 +597,6 @@ body {
   background-repeat: no-repeat;
   background-position: left top;
   animation: strikeLineIn 0.35s ease-out forwards;
-}
-
-.list-item.strikethrough .list-item-title > span {
-  display: block;
-  background-image: linear-gradient(
-    to bottom,
-    transparent calc(0.6em - 0.5px),
-    var(--text) calc(0.6em - 0.5px),
-    var(--text) calc(0.6em + 0.5px),
-    transparent calc(0.6em + 0.5px)
-  );
-  background-size: 0% 1.4em;
-  background-repeat: no-repeat;
-  background-position: left top;
 }
 
 @keyframes strikeLineIn {
@@ -424,7 +613,7 @@ body {
   opacity: 0.5;
 }
 
-.list-item.strikethrough-reverse .list-item-title:not(:has(> span)) {
+.list-item.strikethrough-reverse .list-item-title {
   background-image: linear-gradient(
     to bottom,
     transparent calc(0.6em - 0.5px),
@@ -436,19 +625,6 @@ body {
   background-repeat: no-repeat;
   background-position: left top;
   animation: strikeLineOut 0.35s ease-out forwards;
-}
-
-/* 多行反向：背景由 JS 设置 animation，CSS 提供 background-image */
-.list-item.strikethrough-reverse .list-item-title > span {
-  background-image: linear-gradient(
-    to bottom,
-    transparent calc(0.6em - 0.5px),
-    var(--text) calc(0.6em - 0.5px),
-    var(--text) calc(0.6em + 0.5px),
-    transparent calc(0.6em + 0.5px)
-  );
-  background-repeat: no-repeat;
-  background-position: left top;
 }
 
 .list-item.strikethrough .list-item-domain {
@@ -513,7 +689,7 @@ body {
 }
 
 .toast {
-  position: fixed;
+  position: absolute;
   left: 16px;
   right: 16px;
   bottom: 58px;
@@ -540,5 +716,17 @@ body {
 @media (prefers-color-scheme: dark) {
   .scroll-progress-bar.complete {
     background: #2ecc71;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .random-picker,
+  .random-card {
+    transition: none;
+    animation: none;
+  }
+
+  .random-card {
+    opacity: 1;
   }
 }

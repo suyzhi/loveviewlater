@@ -5,8 +5,10 @@ import {
   addOrBumpItem,
   createSerialExecutor,
   documentKey,
+  getRandomPickPool,
   normalizeStoredList,
   normalizeUrl,
+  pickWeightedOldItems,
   prepareImport,
   urlsReferToSameDocument,
 } from '../core.mjs';
@@ -142,4 +144,28 @@ test('serial executor preserves writes even when tasks have different delays', a
   });
   await Promise.all([first, second]);
   assert.deepEqual(order, ['first', 'second']);
+});
+
+test('random pool excludes read, complete and recently picked items', () => {
+  const now = 1_800_000_000_000;
+  const list = [
+    { id: 'eligible', addedAt: now - 10_000 },
+    { id: 'read', addedAt: now - 20_000, strikethrough: true },
+    { id: 'complete', addedAt: now - 30_000, scrollPercent: 100 },
+    { id: 'cooling', addedAt: now - 40_000, lastRandomPickedAt: now - 1_000 },
+  ];
+  assert.deepEqual(getRandomPickPool(list, { now }).map((item) => item.id), ['eligible']);
+});
+
+test('old-content weighted draw samples without replacement', () => {
+  const now = 1_800_000_000_000;
+  const day = 86400000;
+  const list = [
+    { id: 'new', addedAt: now - day, firstAddedAt: now - day },
+    { id: 'old', addedAt: now - 300 * day, firstAddedAt: now - 300 * day },
+    { id: 'middle', addedAt: now - 30 * day, firstAddedAt: now - 30 * day },
+  ];
+  const picked = pickWeightedOldItems(list, { now, count: 3, random: () => 0.5 });
+  assert.equal(picked[0].id, 'old');
+  assert.equal(new Set(picked.map((item) => item.id)).size, 3);
 });

@@ -1,4 +1,5 @@
 import {
+  RANDOM_PICK_COOLDOWN_MS,
   STORAGE_KEY,
   addOrBumpItem,
   createSerialExecutor,
@@ -137,6 +138,20 @@ function playAddAnimation(tabId, payload) {
   });
 }
 
+async function openTrackedItem({ id, url, scrollY = 0, scrollPercent = 0 }) {
+  if (!isSupportedUrl(url)) throw new Error('页面地址无效');
+  const tab = await chrome.tabs.create({ url, active: true });
+  if (!tab?.id) throw new Error('无法打开页面');
+  await saveTrackedTab(tab.id, {
+    itemId: id,
+    expectedUrl: url,
+    boundUrl: null,
+    restoreScrollY: scrollY,
+    restorePercent: scrollPercent,
+  });
+  return tab;
+}
+
 function closePanel(windowId) {
   const state = panelStates.get(windowId);
   if (!state || state.closing) return;
@@ -238,6 +253,45 @@ async function handlePanelAction(message) {
     };
   }
 
+  if (message.type === 'list:openRandom') {
+    const outcome = await mutateList(async (list) => {
+      const item = list.find((candidate) => candidate.id === message.itemId);
+      if (!item) throw new Error('条目不存在');
+      if (item.strikethrough || Number(item.scrollPercent) >= 100) {
+        throw new Error('该条目已不在随机池中');
+      }
+      const now = Date.now();
+      if (Number.isFinite(item.lastRandomPickedAt)
+        && now - item.lastRandomPickedAt < RANDOM_PICK_COOLDOWN_MS) {
+        throw new Error('这篇内容刚刚抽过，换一篇吧');
+      }
+      item.lastRandomPickedAt = now;
+      await openTrackedItem(item);
+      return { list, item };
+    });
+    broadcastList(outcome, { originWindowId: message.windowId });
+    return { item: outcome.item, list: outcome.list };
+  }
+
+  if (message.type === 'list:markRandomPicked') {
+    const outcome = await mutateList((list) => {
+      const item = list.find((candidate) => candidate.id === message.itemId);
+      if (!item) throw new Error('条目不存在');
+      if (item.strikethrough || Number(item.scrollPercent) >= 100) {
+        throw new Error('该条目已不在随机池中');
+      }
+      const now = Date.now();
+      if (Number.isFinite(item.lastRandomPickedAt)
+        && now - item.lastRandomPickedAt < RANDOM_PICK_COOLDOWN_MS) {
+        return { list, item };
+      }
+      item.lastRandomPickedAt = now;
+      return { list, item };
+    });
+    broadcastList(outcome, { originWindowId: message.windowId });
+    return { item: outcome.item, list: outcome.list };
+  }
+
   throw new Error('未知操作');
 }
 
@@ -268,17 +322,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.type === 'openItem') {
-    if (!isSupportedUrl(message.url)) return;
-    chrome.tabs.create({ url: message.url, active: true }, (tab) => {
-      if (!tab?.id) return;
-      saveTrackedTab(tab.id, {
-        itemId: message.itemId,
-        expectedUrl: message.url,
-        boundUrl: null,
-        restoreScrollY: message.scrollY,
-        restorePercent: message.scrollPercent,
-      });
-    });
+    return respondWith(openTrackedItem({
+      id: message.itemId,
+      url: message.url,
+      scrollY: message.scrollY,
+      scrollPercent: message.scrollPercent,
+    }), sendResponse);
   }
 
   if (message.type === 'scrollUpdate' && sender.tab?.id !== undefined) {

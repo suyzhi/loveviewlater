@@ -10,7 +10,10 @@
   <div id="app">
     <header class="header">
       <h1 class="title">稍后再看</h1>
-      <button id="addBtn" class="btn-primary" title="添加当前页面">+ 添加当前页</button>
+      <div class="header-actions">
+        <button id="randomBtn" class="btn-random" title="从历史遗留内容中命运三选一">🎲 三选一</button>
+        <button id="addBtn" class="btn-primary" title="添加当前页面">+ 当前页</button>
+      </div>
     </header>
     <section class="controls" aria-label="列表筛选与排序">
       <input id="searchInput" class="search-input" type="search" placeholder="搜索标题、网址或来源">
@@ -29,6 +32,26 @@
           <option value="progressAsc">进度最少</option>
           <option value="sourceAsc">来源 A-Z</option>
         </select>
+      </div>
+    </section>
+    <section id="randomPicker" class="random-picker hidden" aria-label="命运三选一" aria-modal="true" role="dialog">
+      <div class="random-picker-header">
+        <div>
+          <h2>命运三选一</h2>
+          <p>越久没看，越容易被抽中</p>
+        </div>
+        <button id="randomCloseBtn" class="random-close" aria-label="关闭命运三选一">×</button>
+      </div>
+      <div id="randomCards" class="random-cards"></div>
+      <p id="randomError" class="random-error hidden" role="alert"></p>
+      <div id="randomEmpty" class="random-empty hidden">
+        <div>🎉</div>
+        <strong>暂时没有可抽的积压</strong>
+        <span>已读、已完成或 7 天内抽过的内容不会出现</span>
+      </div>
+      <div class="random-picker-footer">
+        <span id="randomPoolCount"></span>
+        <button id="randomRerollBtn" class="btn-primary">🎲 换一批</button>
       </div>
     </section>
     <div id="emptyState" class="empty-state hidden">

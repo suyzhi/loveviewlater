@@ -2,9 +2,9 @@ import {
   EXPORT_VERSION,
   IMPORT_MAX_BYTES,
   getDomain,
+  getRandomPickPool,
+  pickWeightedOldItems,
 } from '../core.mjs';
-
-const processedAnimations = new Set();
 
 const elements = {
   list: document.getElementById('list'),
@@ -12,6 +12,14 @@ const elements = {
   footer: document.getElementById('footer'),
   count: document.getElementById('count'),
   addBtn: document.getElementById('addBtn'),
+  randomBtn: document.getElementById('randomBtn'),
+  randomPicker: document.getElementById('randomPicker'),
+  randomCards: document.getElementById('randomCards'),
+  randomError: document.getElementById('randomError'),
+  randomEmpty: document.getElementById('randomEmpty'),
+  randomPoolCount: document.getElementById('randomPoolCount'),
+  randomCloseBtn: document.getElementById('randomCloseBtn'),
+  randomRerollBtn: document.getElementById('randomRerollBtn'),
   searchInput: document.getElementById('searchInput'),
   filterSelect: document.getElementById('filterSelect'),
   sortSelect: document.getElementById('sortSelect'),
@@ -38,6 +46,8 @@ let resizeAnimationFrame = null;
 let closingPanel = false;
 let panelPort = null;
 let panelWindowId = null;
+let randomPickerTimer = null;
+const randomSessionSeen = new Set();
 
 async function getList() {
   const result = await sendAction('list:get');
@@ -81,6 +91,16 @@ function showToast(message) {
   }, 2200);
 }
 
+function restartPanelEnterAnimation() {
+  const app = document.getElementById('app');
+  if (!app) return;
+  closingPanel = false;
+  app.style.width = '';
+  app.classList.remove('collapse-out', 'panel-enter');
+  app.getBoundingClientRect();
+  app.classList.add('panel-enter');
+}
+
 function closePanelWithAnimation() {
   if (closingPanel) return;
   closingPanel = true;
@@ -105,6 +125,122 @@ function closePanelWithAnimation() {
   };
   app.addEventListener('transitionend', handleTransitionEnd);
   setTimeout(finishClose, 460);
+}
+
+function formatBacklogAge(item) {
+  const start = item.firstAddedAt || item.addedAt || Date.now();
+  const days = Math.max(0, Math.floor((Date.now() - start) / 86400000));
+  if (days < 1) return '今天加入';
+  if (days === 1) return '积压 1 天';
+  return `积压 ${days} 天`;
+}
+
+function renderRandomCard(item, index) {
+  const button = document.createElement('button');
+  button.className = 'random-card';
+  button.type = 'button';
+  button.style.setProperty('--deal-delay', `${index * 90}ms`);
+  button.setAttribute('aria-label', `打开候选 ${index + 1}：${item.title || item.url}`);
+
+  const number = document.createElement('span');
+  number.className = 'random-card-number';
+  number.textContent = String(index + 1).padStart(2, '0');
+  const title = document.createElement('strong');
+  title.className = 'random-card-title';
+  title.textContent = item.title || item.url;
+  const meta = document.createElement('span');
+  meta.className = 'random-card-meta';
+  const progress = getProgress(item);
+  meta.textContent = [
+    formatBacklogAge(item),
+    getDomain(item.url),
+    progress > 0 ? `已读 ${progress}%` : '还没开始',
+  ].join(' · ');
+  const action = document.createElement('span');
+  action.className = 'random-card-action';
+  action.textContent = '就看这篇 →';
+  button.append(number, title, meta, action);
+  button.addEventListener('click', () => openRandomItem(item.id));
+  return button;
+}
+
+function drawRandomChoices() {
+  const fullPool = getRandomPickPool(viewState.list);
+  let remainingPool = getRandomPickPool(viewState.list, { excludeIds: randomSessionSeen });
+  if (remainingPool.length === 0 && fullPool.length > 0) {
+    randomSessionSeen.clear();
+    remainingPool = fullPool;
+  }
+  const choices = pickWeightedOldItems(remainingPool, { count: 3 });
+  choices.forEach((item) => randomSessionSeen.add(item.id));
+
+  elements.randomCards.innerHTML = '';
+  elements.randomError.textContent = '';
+  elements.randomError.classList.add('hidden');
+  choices.forEach((item, index) => elements.randomCards.appendChild(renderRandomCard(item, index)));
+  elements.randomEmpty.classList.toggle('hidden', choices.length > 0);
+  elements.randomCards.classList.toggle('hidden', choices.length === 0);
+  elements.randomRerollBtn.disabled = fullPool.length === 0;
+  elements.randomPoolCount.textContent = fullPool.length > 0
+    ? `可抽 ${fullPool.length} 篇`
+    : '随机池已清空';
+}
+
+function openRandomPicker() {
+  clearTimeout(randomPickerTimer);
+  drawRandomChoices();
+  elements.randomPicker.classList.remove('hidden');
+  requestAnimationFrame(() => {
+    elements.randomPicker.classList.add('show');
+    const firstCard = elements.randomCards.querySelector('.random-card');
+    (firstCard || elements.randomCloseBtn).focus();
+  });
+}
+
+function closeRandomPicker() {
+  clearTimeout(randomPickerTimer);
+  elements.randomPicker.classList.remove('show');
+  randomPickerTimer = setTimeout(() => {
+    elements.randomPicker.classList.add('hidden');
+    elements.randomBtn.focus();
+  }, 180);
+}
+
+async function openRandomItem(itemId) {
+  const item = viewState.list.find((candidate) => candidate.id === itemId);
+  if (!item) return;
+  elements.randomPicker.setAttribute('aria-busy', 'true');
+  elements.randomCards.querySelectorAll('.random-card').forEach((card) => {
+    card.disabled = true;
+  });
+  try {
+    const openResponse = await chrome.runtime.sendMessage({
+      type: 'openItem',
+      url: item.url,
+      itemId: item.id,
+      scrollY: item.scrollY || 0,
+      scrollPercent: item.scrollPercent || 0,
+    });
+    if (openResponse?.ok === false) throw new Error(openResponse.error || '无法打开页面');
+
+    try {
+      const result = await sendAction('list:markRandomPicked', { itemId, windowId: panelWindowId });
+      viewState.list = result.list;
+    } catch (error) {
+      if (!/未知操作/.test(error.message)) throw error;
+      // 兼容尚未重载的新旧后台：页面已经打开，冷却记录会在重载后恢复。
+    }
+    closeRandomPicker();
+    showToast('🎲 已从历史积压中抽出一篇');
+  } catch (error) {
+    elements.randomError.textContent = error.message || '无法打开所选页面';
+    elements.randomError.classList.remove('hidden');
+    elements.randomCards.querySelectorAll('.random-card').forEach((card) => {
+      card.disabled = false;
+    });
+  } finally {
+    elements.randomPicker.removeAttribute('aria-busy');
+  }
 }
 
 function matchesFilter(item) {
@@ -286,7 +422,6 @@ function renderItem(item) {
   const titleEl = document.createElement('div');
   titleEl.className = 'list-item-title';
   titleEl.textContent = item.title || item.url;
-  if (item.strikethrough) titleEl.dataset.s = '';
 
   const domainEl = document.createElement('div');
   domainEl.className = 'list-item-domain';
@@ -404,35 +539,20 @@ async function toggleStrikethrough(id) {
   const titleEl = li.querySelector('.list-item-title');
 
   if (!item.strikethrough) {
-    // 取消删除线：直接操作现有 DOM
     li.classList.remove('strikethrough');
     li.classList.add('strikethrough-reverse');
-    const spans = titleEl?.querySelectorAll(':scope > span');
-    if (spans?.length > 0) {
-      spans.forEach((span, i) => {
-        span.style.animation = `strikeLineOut 0.35s ease-out ${(i * 0.1).toFixed(2)}s forwards`;
-      });
-    }
     setTimeout(() => {
       li.classList.remove('strikethrough-reverse');
       if (titleEl) {
-        titleEl.innerHTML = '';
         titleEl.textContent = item.title || item.url;
-        delete titleEl.dataset.s;
-        titleEl.style.cssText = '';
       }
       updateCount();
-    }, 450);
+    }, 380);
   } else {
-    // 添加删除线：直接修改现有 DOM
     li.classList.add('strikethrough');
     if (titleEl) {
-      titleEl.innerHTML = '';
       titleEl.textContent = item.title || item.url;
-      titleEl.dataset.s = '';
     }
-    processedAnimations.delete(item.id);
-    requestAnimationFrame(splitStrikethroughLines);
     updateCount();
   }
 }
@@ -536,52 +656,6 @@ function renderList(list = viewState.list) {
     : `显示 ${visibleList.length} / 共 ${viewState.list.length} 项`;
   animateListMovement(before);
   observeListLayout();
-  requestAnimationFrame(splitStrikethroughLines);
-}
-
-function splitStrikethroughLines() {
-  document.querySelectorAll('.list-item-title[data-s]').forEach(el => {
-    const itemId = el.closest('.list-item')?.dataset.id;
-    if (!itemId || processedAnimations.has(itemId)) return;
-    processedAnimations.add(itemId);
-    const text = el.textContent;
-    const lh = parseFloat(getComputedStyle(el).lineHeight);
-    if (!lh || !text) return;
-
-    // 逐字包裹测量分行
-    el.textContent = '';
-    const chars = [];
-    for (const ch of text) {
-      const s = document.createElement('s');
-      s.textContent = ch;
-      s.style.cssText = 'display:inline; white-space:pre; font:inherit';
-      el.appendChild(s);
-      chars.push(s);
-    }
-
-    // 按 offsetTop 分组
-    const lines = [{ spans: [chars[0]], text: chars[0].textContent }];
-    for (let i = 1; i < chars.length; i++) {
-      const lastTop = chars[i - 1].offsetTop;
-      if (chars[i].offsetTop > lastTop + 1) {
-        lines.push({ spans: [chars[i]], text: chars[i].textContent });
-      } else {
-        lines[lines.length - 1].spans.push(chars[i]);
-        lines[lines.length - 1].text += chars[i].textContent;
-      }
-    }
-
-    // 重建为逐行 span
-    el.textContent = '';
-    lines.forEach((line, i) => {
-      const span = document.createElement('span');
-      span.textContent = line.text;
-      span.style.display = 'block';
-      const delay = (i * 0.1).toFixed(2);
-      span.style.cssText += `animation: strikeLineIn 0.35s ease-out ${delay}s forwards;`;
-      el.appendChild(span);
-    });
-  });
 }
 
 async function addCurrentTab() {
@@ -632,7 +706,11 @@ function handlePanelMessage(msg) {
     closePanelWithAnimation();
   }
   if (msg.type === 'listUpdated') {
-    if (msg.originWindowId === null || msg.originWindowId !== panelWindowId) renderList(msg.list || []);
+    const cameFromAnotherWindow = msg.originWindowId === null || msg.originWindowId !== panelWindowId;
+    if (cameFromAnotherWindow) {
+      renderList(msg.list || []);
+      if (!elements.randomPicker.classList.contains('hidden')) drawRandomChoices();
+    }
     if (msg.feedback) showToast(msg.feedback);
   }
   if (msg.type !== 'scrollProgressUpdated') return;
@@ -685,10 +763,18 @@ async function init() {
     panelPort.postMessage({ type: 'registerPanel', windowId: panelWindowId });
   }
   panelPort.onMessage.addListener(handlePanelMessage);
-  const list = await getList();
-  renderList(list);
+  try {
+    const list = await getList();
+    renderList(list);
+  } catch (error) {
+    renderList([]);
+    showToast(error.message || '列表加载失败');
+  }
 
   elements.addBtn.addEventListener('click', addCurrentTab);
+  elements.randomBtn.addEventListener('click', openRandomPicker);
+  elements.randomCloseBtn.addEventListener('click', closeRandomPicker);
+  elements.randomRerollBtn.addEventListener('click', drawRandomChoices);
   elements.searchInput.addEventListener('input', (e) => {
     viewState.query = e.target.value;
     renderList();
@@ -713,7 +799,23 @@ async function init() {
   elements.importFileInput.addEventListener('change', (e) => {
     if (e.target.files[0]) { importData(e.target.files[0]); e.target.value = ''; }
   });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && !elements.randomPicker.classList.contains('hidden')) {
+      closeRandomPicker();
+    }
+  });
 
 }
 
-document.addEventListener('DOMContentLoaded', init);
+document.addEventListener('DOMContentLoaded', () => {
+  restartPanelEnterAnimation();
+  init();
+});
+
+window.addEventListener('pageshow', (event) => {
+  if (event.persisted) restartPanelEnterAnimation();
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') restartPanelEnterAnimation();
+});
