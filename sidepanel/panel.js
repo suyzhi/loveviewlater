@@ -38,6 +38,8 @@ const viewState = {
   sort: 'addedDesc',
 };
 
+const SEARCH_RENDER_DELAY = 180;
+
 let toastTimer = null;
 let pendingDelete = null;
 let observedListRects = new Map();
@@ -47,7 +49,15 @@ let closingPanel = false;
 let panelPort = null;
 let panelWindowId = null;
 let randomPickerTimer = null;
+let searchRenderTimer = null;
+let queuedFrame = 0;
+let frameQueue = [];
+let renderedSignature = null;
 const randomSessionSeen = new Set();
+
+// 每一行的动画可能同时在跑，按 id 收敛，避免同一元素叠加多个动画。
+const rowAnimations = new Map();
+const rowStates = new WeakMap();
 
 async function getList() {
   const result = await sendAction('list:get');
@@ -58,6 +68,10 @@ async function sendAction(type, payload = {}) {
   const response = await chrome.runtime.sendMessage({ type, ...payload });
   if (!response?.ok) throw new Error(response?.error || '操作失败');
   return response.data;
+}
+
+function prefersReducedMotion() {
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 }
 
 function formatTime(ts) {
@@ -292,72 +306,111 @@ function getListItemRects() {
   return rects;
 }
 
-function animateListMovement(fromRects) {
-  requestAnimationFrame(() => {
-    document.querySelectorAll('.list-item').forEach((el) => {
-      const from = fromRects.get(el.dataset.id);
-      const to = el.getBoundingClientRect();
-      if (!from) {
-        el.animate(
-          [
-            { opacity: 0, transform: 'translateY(6px)' },
-            { opacity: 1, transform: 'translateY(0)' },
-          ],
-          { duration: 180, easing: 'cubic-bezier(.2,.8,.2,1)' }
+function visibleSignature() {
+  const progressSensitive = ['progressAsc', 'progressDesc'].includes(viewState.sort);
+  return getVisibleList()
+    .map((item) => (progressSensitive ? `${item.id}:${getProgress(item)}` : item.id))
+    .join(',');
+}
+
+function rowAnimation(id) {
+  let api = rowAnimations.get(id);
+  if (!api) {
+    const animations = new Set();
+    api = {
+      animations,
+      queue(creator) {
+        this.cancel();
+        const animation = creator();
+        if (!animation) return;
+        animations.add(animation);
+        animation.finished.then(
+          () => animations.delete(animation),
+          () => animations.delete(animation)
         );
-        return;
+      },
+      cancel() {
+        for (const animation of animations) {
+          try {
+            animation.cancel();
+          } catch {
+            // 动画可能已经结束。
+          }
+        }
+        animations.clear();
+      },
+    };
+    rowAnimations.set(id, api);
+  }
+  return api;
+}
+
+function clearRowAnimations(id) {
+  rowAnimations.get(id)?.cancel();
+  rowAnimations.delete(id);
+}
+
+async function deleteItem(id) {
+  const result = await sendAction('list:delete', { itemId: id, windowId: panelWindowId });
+  viewState.list = result.list;
+  renderList(result.list);
+  showToast('已删除');
+}
+
+function enterAnimation(el) {
+  if (prefersReducedMotion()) return null;
+  return el.animate(
+    [
+      { opacity: 0, transform: 'translateY(8px)' },
+      { opacity: 1, transform: 'translateY(0)' },
+    ],
+    { duration: 200, easing: 'cubic-bezier(.2,.8,.2,1)' }
+  );
+}
+
+function shiftAnimation(el, dy) {
+  if (prefersReducedMotion()) return null;
+  if (Math.abs(dy) < 0.5) return null;
+  return el.animate(
+    [
+      { transform: `translateY(${dy}px)` },
+      { transform: 'translateY(0)' },
+    ],
+    { duration: 260, easing: 'cubic-bezier(.2,.8,.2,1)' }
+  );
+}
+
+// 把 DOM 变更和数据更新收进同一帧：先量旧位置，再改 DOM，再排 FLIP。
+function queueFrame(callback) {
+  frameQueue.push(callback);
+  if (queuedFrame) return;
+  queuedFrame = requestAnimationFrame(() => {
+    queuedFrame = 0;
+    const queue = frameQueue;
+    frameQueue = [];
+    for (const task of queue) {
+      try {
+        task();
+      } catch (error) {
+        console.error(error);
       }
-
-      const dx = from.left - to.left;
-      const dy = from.top - to.top;
-      if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5) return;
-
-      el.animate(
-        [
-          { transform: `translate(${dx}px, ${dy}px)` },
-          { transform: 'translate(0, 0)' },
-        ],
-        { duration: 260, easing: 'cubic-bezier(.2,.8,.2,1)' }
-      );
-    });
-    observedListRects = getListItemRects();
+    }
   });
 }
 
-function animateItemsBelowResize(fromRects, changedRects) {
-  requestAnimationFrame(() => {
-    const changedBottoms = [...changedRects.values()]
-      .map((rect) => rect.bottom)
-      .sort((a, b) => a - b);
-
-    document.querySelectorAll('.list-item').forEach((el) => {
-      const from = fromRects.get(el.dataset.id);
-      const to = el.getBoundingClientRect();
-      if (!from || changedRects.has(el.dataset.id)) return;
-
-      const affected = changedBottoms.some((bottom) => from.top >= bottom - 0.5);
-      if (!affected) return;
-
-      const dy = from.top - to.top;
-      if (Math.abs(dy) < 0.5) return;
-
-      el.animate(
-        [
-          { transform: `translateY(${dy}px)` },
-          { transform: 'translateY(0)' },
-        ],
-        { duration: 260, easing: 'cubic-bezier(.2,.8,.2,1)' }
-      );
-    });
-
-    observedListRects = getListItemRects();
-  });
-}
-
-function animateLayoutChange(change) {
-  const before = getListItemRects();
-  change();
-  animateListMovement(before);
+function flushFrameQueue() {
+  if (!queuedFrame) return;
+  cancelAnimationFrame(queuedFrame);
+  queuedFrame = 0;
+  const queue = frameQueue;
+  frameQueue = [];
+  for (const task of queue) {
+    try {
+      task();
+    } catch (error) {
+      console.error(error);
+    }
+  }
 }
 
 function observeListLayout() {
@@ -395,10 +448,30 @@ function observeListLayout() {
   observedListRects = getListItemRects();
 }
 
-function renderItem(item) {
+function animateItemsBelowResize(fromRects, changedRects) {
+  const changedBottoms = [...changedRects.values()]
+    .map((rect) => rect.bottom)
+    .sort((a, b) => a - b);
+
+  document.querySelectorAll('.list-item').forEach((el) => {
+    const from = fromRects.get(el.dataset.id);
+    if (!from || changedRects.has(el.dataset.id)) return;
+
+    const affected = changedBottoms.some((bottom) => from.top >= bottom - 0.5);
+    if (!affected) return;
+
+    const dy = from.top - el.getBoundingClientRect().top;
+    if (Math.abs(dy) < 0.5) return;
+
+    rowAnimation(el.dataset.id).queue(() => shiftAnimation(el, dy));
+  });
+
+  observedListRects = getListItemRects();
+}
+
+function createRow(item) {
   const li = document.createElement('li');
   li.className = 'list-item';
-  if (item.strikethrough) li.classList.add('strikethrough');
   li.dataset.id = item.id;
 
   const favicon = item.favicon ? document.createElement('img') : document.createElement('span');
@@ -425,18 +498,12 @@ function renderItem(item) {
 
   const domainEl = document.createElement('div');
   domainEl.className = 'list-item-domain';
-  let domainText = `${getDomain(item.url)} · ${formatTime(item.addedAt)}`;
-  if (item.scrollPercent !== undefined && item.scrollPercent > 0) {
-    domainText += ` · ${item.scrollPercent}%`;
-  }
-  domainEl.textContent = domainText;
 
   content.appendChild(titleEl);
   content.appendChild(domainEl);
 
   const sourceEl = document.createElement('div');
   sourceEl.className = 'list-item-source';
-  sourceEl.textContent = `来源 ${sourceText(item) || '未知'}`;
   sourceEl.title = item.sourceUrl ? `打开来源：${item.sourceUrl}` : '打开来源';
   sourceEl.tabIndex = 0;
   sourceEl.addEventListener('click', (e) => {
@@ -452,26 +519,12 @@ function renderItem(item) {
   });
   content.appendChild(sourceEl);
 
-  // 浏览进度条
-  if (item.scrollPercent !== undefined && item.scrollPercent > 0) {
-    const progressContainer = document.createElement('div');
-    progressContainer.className = 'scroll-progress';
-    const progressBar = document.createElement('div');
-    progressBar.className = 'scroll-progress-bar';
-    const pct = Math.min(100, item.scrollPercent);
-    progressBar.style.width = pct + '%';
-    if (pct >= 100) progressBar.classList.add('complete');
-    progressContainer.appendChild(progressBar);
-    content.appendChild(progressContainer);
-  }
-
   const actions = document.createElement('div');
   actions.className = 'list-item-actions';
 
   const readCheckbox = document.createElement('input');
   readCheckbox.className = 'list-item-read';
   readCheckbox.type = 'checkbox';
-  readCheckbox.checked = !!item.strikethrough;
   readCheckbox.title = '标记已读';
   readCheckbox.setAttribute('aria-label', '标记已读');
   readCheckbox.addEventListener('click', (e) => {
@@ -490,7 +543,7 @@ function renderItem(item) {
       deleteItem(item.id);
       return;
     }
-    armDeleteButton(deleteBtn);
+    armDeleteButton(item.id);
   });
   deleteBtn.addEventListener('contextmenu', (e) => {
     e.preventDefault();
@@ -505,7 +558,7 @@ function renderItem(item) {
   cancelDeleteBtn.setAttribute('aria-label', '取消删除');
   cancelDeleteBtn.addEventListener('click', (e) => {
     e.stopPropagation();
-    resetPendingDelete(deleteBtn);
+    resetPendingDelete(item.id);
   });
 
   actions.appendChild(readCheckbox);
@@ -518,43 +571,119 @@ function renderItem(item) {
 
   li.addEventListener('click', () => openItem(item));
 
+  li._readLater = { content, titleEl, domainEl, sourceEl, readCheckbox, deleteBtn, cancelDeleteBtn };
   return li;
 }
 
-async function toggleStrikethrough(id) {
-  const result = await sendAction('list:toggleRead', { itemId: id, windowId: panelWindowId });
-  const item = result.item;
-  if (!item) return;
+// 删除线动画只操作标题行，避免整行重排；正反两个方向都从当前状态出发。
+const strikeAnimations = new WeakMap();
 
-  const li = document.querySelector(`.list-item[data-id="${CSS.escape(id)}"]`);
-  if (!li) return;
+// 与 CSS 中的删除线保持一致：取消已读时 class 会立刻移除，
+// 所以反向动画必须自己带上背景图，否则那一下是直接消失而不是滑走。
+const STRIKE_LINE_IMAGE = 'linear-gradient(to bottom, '
+  + 'transparent calc(0.6em - 0.5px), var(--text) calc(0.6em - 0.5px), '
+  + 'var(--text) calc(0.6em + 0.5px), transparent calc(0.6em + 0.5px))';
 
-  viewState.list = result.list;
+function clearStrikeInline(titleEl) {
+  strikeAnimations.get(titleEl)?.cancel();
+  strikeAnimations.delete(titleEl);
+  titleEl.style.backgroundImage = '';
+  titleEl.style.backgroundSize = '';
+  titleEl.style.backgroundRepeat = '';
+  titleEl.style.backgroundPosition = '';
+}
 
-  if (viewState.filter !== 'all') {
-    renderList(result.list);
+function playStrikeAnimation(li, struck) {
+  const titleEl = li._readLater?.titleEl;
+  if (!titleEl || prefersReducedMotion()) return;
+  strikeAnimations.get(titleEl)?.cancel();
+  const from = struck ? 0 : 100;
+  const to = struck ? 100 : 0;
+  const frame = (percent) => ({
+    backgroundImage: STRIKE_LINE_IMAGE,
+    backgroundRepeat: 'no-repeat',
+    backgroundPosition: 'left top',
+    backgroundSize: `${percent}% 1.4em`,
+  });
+  const animation = titleEl.animate([frame(from), frame(to)],
+    { duration: 280, easing: 'ease-out', fill: 'forwards' });
+  strikeAnimations.set(titleEl, animation);
+  animation.finished.then(() => {
+    if (strikeAnimations.get(titleEl) === animation) clearStrikeInline(titleEl);
+  }, () => {});
+}
+
+function normalizeStrike(el) {
+  const titleEl = el._readLater?.titleEl;
+  if (titleEl) clearStrikeInline(titleEl);
+}
+
+function setRowStruck(el, struck, { animate = false } = {}) {
+  const state = rowStates.get(el);
+  if (state) state.struck = struck;
+  if (el.dataset.struck !== (struck ? '1' : '0')) {
+    el.dataset.struck = struck ? '1' : '0';
+    if (animate) playStrikeAnimation(el, struck);
+    else normalizeStrike(el);
+  }
+  el.classList.toggle('strikethrough', struck);
+}
+
+function paintProgress(row, li, item) {
+  const percent = getProgress(item);
+  const state = rowStates.get(li);
+  if (state) state.percent = item.scrollPercent;
+  if (row.domainEl) {
+    row.domainEl.textContent = `${getDomain(item.url)} · ${formatTime(item.addedAt)}${percent > 0 ? ` · ${percent}%` : ''}`;
+  }
+  let progressContainer = row.content.querySelector('.scroll-progress');
+  if (percent <= 0) {
+    if (progressContainer) progressContainer.remove();
     return;
   }
-
-  const titleEl = li.querySelector('.list-item-title');
-
-  if (!item.strikethrough) {
-    li.classList.remove('strikethrough');
-    li.classList.add('strikethrough-reverse');
-    setTimeout(() => {
-      li.classList.remove('strikethrough-reverse');
-      if (titleEl) {
-        titleEl.textContent = item.title || item.url;
-      }
-      updateCount();
-    }, 380);
-  } else {
-    li.classList.add('strikethrough');
-    if (titleEl) {
-      titleEl.textContent = item.title || item.url;
-    }
-    updateCount();
+  if (!progressContainer) {
+    progressContainer = document.createElement('div');
+    progressContainer.className = 'scroll-progress';
+    const progressBar = document.createElement('div');
+    progressBar.className = 'scroll-progress-bar';
+    progressContainer.appendChild(progressBar);
+    row.content.appendChild(progressContainer);
   }
+  const bar = progressContainer.querySelector('.scroll-progress-bar');
+  if (!bar) return;
+  const width = `${Math.min(100, percent)}%`;
+  if (bar.style.width !== width) bar.style.width = width;
+  bar.classList.toggle('complete', percent >= 100);
+}
+
+// 整行内容刷新：只在值真的变了的时候写 DOM，避免无谓的重排与动画抖动。
+function paintRow(li, item) {
+  const row = li._readLater;
+  if (!row) return;
+  const state = rowStates.get(li) || {};
+  const title = item.title || item.url;
+  if (row.titleEl.textContent !== title) row.titleEl.textContent = title;
+  row.sourceEl.textContent = `来源 ${sourceText(item) || '未知'}`;
+  row.sourceEl.title = item.sourceUrl ? `打开来源：${item.sourceUrl}` : '打开来源';
+  row.readCheckbox.checked = !!item.strikethrough;
+  if (state.percent !== item.scrollPercent) {
+    paintProgress(row, li, item);
+  }
+  setRowStruck(li, !!item.strikethrough);
+}
+
+function renderRow(item) {
+  const li = createRow(item);
+  rowStates.set(li, { struck: !!item.strikethrough, percent: undefined });
+  paintRow(li, item);
+  return li;
+}
+
+function patchRow(li, item) {
+  const state = rowStates.get(li);
+  if (state) state.percent = undefined;
+  paintRow(li, item);
+  return li;
 }
 
 function updateCount() {
@@ -574,9 +703,12 @@ function openItem(item) {
   });
 }
 
-function armDeleteButton(button) {
+function armDeleteButton(itemId) {
   resetPendingDelete();
-  const cancelButton = button.parentElement?.querySelector('.list-item-cancel-delete');
+  const li = elements.list.querySelector(`.list-item[data-id="${CSS.escape(itemId)}"]`);
+  const button = li?._readLater?.deleteBtn;
+  const cancelButton = li?._readLater?.cancelDeleteBtn;
+  if (!button) return;
 
   button.classList.add('confirming');
   button.textContent = '删除';
@@ -588,16 +720,17 @@ function armDeleteButton(button) {
   }
 
   pendingDelete = {
+    itemId,
     button,
     cancelButton,
-    timer: setTimeout(() => resetPendingDelete(button), 3000),
+    timer: setTimeout(() => resetPendingDelete(itemId), 3000),
   };
 }
 
-function resetPendingDelete(exceptButton = null) {
+function resetPendingDelete(exceptItemId = null) {
   if (!pendingDelete) return;
-  const { button, cancelButton, timer } = pendingDelete;
-  if (exceptButton && button !== exceptButton) return;
+  const { itemId, button, cancelButton, timer } = pendingDelete;
+  if (exceptItemId && itemId !== exceptItemId) return;
   clearTimeout(timer);
   button.classList.remove('confirming');
   button.textContent = '🗑';
@@ -616,13 +749,6 @@ function openSource(item) {
   chrome.tabs.create({ url, active: true });
 }
 
-async function deleteItem(id) {
-  const result = await sendAction('list:delete', { itemId: id, windowId: panelWindowId });
-  viewState.list = result.list;
-  renderList(result.list);
-  showToast('已删除');
-}
-
 function updateEmptyState(visibleCount, totalCount) {
   const isEmpty = totalCount === 0;
   elements.emptyState.classList.toggle('hidden', !isEmpty && visibleCount > 0);
@@ -639,23 +765,94 @@ function updateEmptyState(visibleCount, totalCount) {
   }
 }
 
+function renderEmptyList() {
+  for (const el of elements.list.children) clearRowAnimations(el.dataset.id);
+  elements.list.innerHTML = '';
+  renderedSignature = '';
+  updateEmptyState(0, viewState.list.length);
+  elements.count.textContent = viewState.list.length ? `显示 0 / 共 ${viewState.list.length} 项` : '';
+}
+
+// keyed 复用：条目 DOM 只创建一次，筛选/排序/进度更新不再推倒重来。
 function renderList(list = viewState.list) {
-  const before = getListItemRects();
   viewState.list = list;
   const visibleList = getVisibleList();
-  const isEmpty = viewState.list.length === 0;
-  elements.list.innerHTML = '';
-  updateEmptyState(visibleList.length, viewState.list.length);
-  if (isEmpty || visibleList.length === 0) {
-    elements.count.textContent = viewState.list.length ? `显示 0 / 共 ${viewState.list.length} 项` : '';
+  if (visibleList.length === 0) {
+    renderEmptyList();
     return;
   }
-  visibleList.forEach(item => elements.list.appendChild(renderItem(item)));
-  elements.count.textContent = visibleList.length === viewState.list.length
-    ? `共 ${viewState.list.length} 项`
-    : `显示 ${visibleList.length} / 共 ${viewState.list.length} 项`;
-  animateListMovement(before);
-  observeListLayout();
+
+  const signature = visibleSignature();
+  if (signature === renderedSignature && elements.list.children.length === visibleList.length) {
+    updateCount();
+    return;
+  }
+
+  // 必须在任何 DOM 变更之前量旧位置，包括进度条插入这种会让行变高的更新。
+  const before = getListItemRects();
+
+  const existing = new Map();
+  for (const el of elements.list.children) existing.set(el.dataset.id, el);
+
+  const orderedNodes = visibleList.map((item) => {
+    const previous = existing.get(item.id);
+    if (previous) {
+      existing.delete(item.id);
+      return patchRow(previous, item);
+    }
+    return renderRow(item);
+  });
+
+  queueFrame(() => {
+    elements.list.append(...orderedNodes);
+    for (const el of existing.values()) {
+      clearRowAnimations(el.dataset.id);
+      el.remove();
+    }
+    for (const el of orderedNodes) {
+      const from = before.get(el.dataset.id);
+      if (!from) {
+        if (!prefersReducedMotion()) rowAnimation(el.dataset.id).queue(() => enterAnimation(el));
+        continue;
+      }
+      const dy = from.top - el.getBoundingClientRect().top;
+      if (Math.abs(dy) < 0.5) continue;
+      rowAnimation(el.dataset.id).queue(() => shiftAnimation(el, dy));
+    }
+    renderedSignature = signature;
+    updateEmptyState(orderedNodes.length, viewState.list.length);
+    updateCount();
+    observeListLayout();
+  });
+}
+
+function scheduleSearchRender() {
+  clearTimeout(searchRenderTimer);
+  searchRenderTimer = setTimeout(() => {
+    searchRenderTimer = null;
+    flushFrameQueue();
+    renderList();
+  }, SEARCH_RENDER_DELAY);
+}
+
+async function toggleStrikethrough(id) {
+  const result = await sendAction('list:toggleRead', { itemId: id, windowId: panelWindowId });
+  const item = result.item;
+  if (!item) return;
+
+  viewState.list = result.list;
+  const li = elements.list.querySelector(`.list-item[data-id="${CSS.escape(id)}"]`);
+  if (!li) {
+    renderList(result.list);
+    return;
+  }
+
+  setRowStruck(li, !!item.strikethrough, { animate: true });
+  if (viewState.filter !== 'all' || ['progressAsc', 'progressDesc'].includes(viewState.sort)) {
+    renderList(result.list);
+    return;
+  }
+  updateCount();
 }
 
 async function addCurrentTab() {
@@ -701,6 +898,20 @@ async function importData(file) {
   }
 }
 
+function patchProgressRow(itemId) {
+  const item = viewState.list.find((candidate) => candidate.id === itemId);
+  if (!item) return;
+  const li = elements.list.querySelector(`.list-item[data-id="${CSS.escape(itemId)}"]`);
+  if (!li?._readLater) return;
+  const from = li.getBoundingClientRect();
+  paintRow(li, item);
+  // 进度条首次出现会让本行变高，下方条目补一次平滑让位。这里在同一帧内量完前后位置。
+  const to = li.getBoundingClientRect();
+  if (Math.abs(from.top - to.top) >= 0.5 || Math.abs(from.height - to.height) >= 0.5) {
+    observeListLayout();
+  }
+}
+
 function handlePanelMessage(msg) {
   if (msg.type === 'closePanel') {
     closePanelWithAnimation();
@@ -708,6 +919,7 @@ function handlePanelMessage(msg) {
   if (msg.type === 'listUpdated') {
     const cameFromAnotherWindow = msg.originWindowId === null || msg.originWindowId !== panelWindowId;
     if (cameFromAnotherWindow) {
+      flushFrameQueue();
       renderList(msg.list || []);
       if (!elements.randomPicker.classList.contains('hidden')) drawRandomChoices();
     }
@@ -720,39 +932,17 @@ function handlePanelMessage(msg) {
     itemInState.scrollPercent = msg.percent;
     itemInState.scrollY = msg.scrollY;
   }
+  if (!itemInState) return;
+
   const progressSensitiveView = ['inProgress', 'complete'].includes(viewState.filter)
     || ['progressAsc', 'progressDesc'].includes(viewState.sort);
   if (progressSensitiveView) {
-    renderList();
+    // 只有可见结果真的变了才重排，滚动过程中的重复进度不再触发整表动画。
+    if (visibleSignature() !== renderedSignature) renderList();
     return;
   }
 
-  // 普通视图只更新单个项目，避免滚动时频繁重绘。
-  const li = document.querySelector(`.list-item[data-id="${CSS.escape(msg.itemId)}"]`);
-  if (!li) return;
-  const content = li.querySelector('.list-item-content');
-  const domainEl = li.querySelector('.list-item-domain');
-  if (domainEl && itemInState) {
-    domainEl.textContent = `${getDomain(itemInState.url)} · ${formatTime(itemInState.addedAt)} · ${msg.percent}%`;
-  }
-  let progressContainer = li.querySelector('.scroll-progress');
-  const pct = Math.min(100, msg.percent);
-  if (progressContainer) {
-    const bar = progressContainer.querySelector('.scroll-progress-bar');
-    if (bar) {
-      bar.style.width = pct + '%';
-      bar.classList.toggle('complete', pct >= 100);
-    }
-  } else if (pct > 0 && content) {
-    progressContainer = document.createElement('div');
-    progressContainer.className = 'scroll-progress';
-    const progressBar = document.createElement('div');
-    progressBar.className = 'scroll-progress-bar';
-    progressBar.style.width = pct + '%';
-    if (pct >= 100) progressBar.classList.add('complete');
-    progressContainer.appendChild(progressBar);
-    content.appendChild(progressContainer);
-  }
+  patchProgressRow(msg.itemId);
 }
 
 async function init() {
@@ -774,10 +964,17 @@ async function init() {
   elements.addBtn.addEventListener('click', addCurrentTab);
   elements.randomBtn.addEventListener('click', openRandomPicker);
   elements.randomCloseBtn.addEventListener('click', closeRandomPicker);
-  elements.randomRerollBtn.addEventListener('click', drawRandomChoices);
+  elements.randomRerollBtn.addEventListener('click', () => {
+    clearTimeout(randomPickerTimer);
+    // 重新触发一次抽卡入场：先落回初始态，下一帧再贴上 .show。
+    elements.randomPicker.getBoundingClientRect();
+    elements.randomPicker.classList.remove('show');
+    drawRandomChoices();
+    requestAnimationFrame(() => elements.randomPicker.classList.add('show'));
+  });
   elements.searchInput.addEventListener('input', (e) => {
     viewState.query = e.target.value;
-    renderList();
+    scheduleSearchRender();
   });
   elements.filterSelect.addEventListener('change', (e) => {
     viewState.filter = e.target.value;
@@ -804,7 +1001,6 @@ async function init() {
       closeRandomPicker();
     }
   });
-
 }
 
 document.addEventListener('DOMContentLoaded', () => {

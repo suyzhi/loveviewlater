@@ -33,8 +33,18 @@ class FakeElement {
     if (this.parent) this.parent.children = this.parent.children.filter((child) => child !== this);
   }
 
-  animate() {
-    const animation = { cancelled: false, cancel() { this.cancelled = true; } };
+  getBoundingClientRect() {
+    return { width: 148, height: 42, left: 0, top: 0, right: 148, bottom: 42 };
+  }
+
+  animate(frames = [], options = {}) {
+    const animation = {
+      frames,
+      options,
+      cancelled: false,
+      finished: Promise.resolve(),
+      cancel() { this.cancelled = true; },
+    };
     this.animations.push(animation);
     return animation;
   }
@@ -55,6 +65,8 @@ function createHarness() {
   document.documentElement = new FakeElement('html', document);
   document.head = new FakeElement('head', document);
   document.documentElement.appendChild(document.head);
+  document.body = new FakeElement('body', document);
+  document.documentElement.appendChild(document.body);
 
   const context = {
     chrome: { runtime: { onMessage: { addListener(listener) { messageListener = listener; } } } },
@@ -81,7 +93,14 @@ function createHarness() {
 }
 
 function animationLayers(document) {
-  return document.documentElement.children.filter((child) => child.className === 'read-later-catch-layer');
+  const roots = [document.body, document.documentElement].filter(Boolean);
+  return roots.flatMap((root) => root.children.filter((child) => child.className === 'read-later-catch-layer'));
+}
+
+// 纸张被包在 .read-later-paper-plane 里：外层只跑位移，内层只跑圆角/形变。
+function paperOf(layer) {
+  const plane = layer.children.find((child) => child.className === 'read-later-paper-plane');
+  return plane?.children.find((child) => child.className === 'read-later-paper');
 }
 
 test('animation runtime keeps only the newest layer and uses duplicate copy', async () => {
@@ -95,14 +114,14 @@ test('animation runtime keeps only the newest layer and uses duplicate copy', as
   const firstLayer = animationLayers(harness.document)[0];
   assert.equal(animationLayers(harness.document).length, 1);
   assert.equal(firstLayer.dataset.animationId, 'first');
-  assert.equal(firstLayer.children[1].children[1].textContent, '收进稍后再看');
+  assert.equal(paperOf(firstLayer).children[1].textContent, '收进稍后再看');
 
   listener({ type: 'playAddAnimation', animationId: 'second', duplicate: true, label: 'Second' });
   const secondLayer = animationLayers(harness.document)[0];
   assert.equal(firstLayer.removed, true);
   assert.equal(animationLayers(harness.document).length, 1);
   assert.equal(secondLayer.dataset.animationId, 'second');
-  assert.equal(secondLayer.children[1].children[1].textContent, '已在列表中 · 已置顶');
+  assert.equal(paperOf(secondLayer).children[1].textContent, '已在列表中 · 已置顶');
 
   const cleanupTimer = [...harness.timers.values()].find((timer) => timer.delay === 1600);
   assert.ok(cleanupTimer);
@@ -110,7 +129,29 @@ test('animation runtime keeps only the newest layer and uses duplicate copy', as
   assert.equal(animationLayers(harness.document).length, 0);
 });
 
-test('reduced motion skips sparks and uses the short cleanup timer', async () => {
+test('paper motion stays on compositor-friendly properties', async () => {
+  const source = await fs.readFile(new URL('../content-add-animation.js', import.meta.url), 'utf8');
+  const harness = createHarness();
+  vm.runInContext(source, harness.context);
+  harness.getMessageListener()({ type: 'playAddAnimation', animationId: 'perf', label: 'Perf' });
+
+  const plane = animationLayers(harness.document)[0].children[1];
+  const paper = paperOf(animationLayers(harness.document)[0]);
+  assert.equal(plane.animations.length, 1); // 路径只跑 transform / opacity
+  assert.equal(paper.animations.length, 2); // 挤压/拉伸 + 圆角，都在内层
+  // 路径动画的每一帧只允许 transform / opacity，避免逐帧重绘。
+  const allowed = new Set(['transform', 'opacity', 'offset']);
+  for (const frame of plane.animations[0].frames) {
+    assert.ok(Object.keys(frame).every((key) => allowed.has(key)), `unexpected key in ${JSON.stringify(frame)}`);
+  }
+  assert.ok(plane.animations[0].frames.every((frame) => !('filter' in frame) && !('borderRadius' in frame)));
+  // 圆角单独放在内层元素上。
+  const radiusAnimation = paper.animations.find((animation) => 'borderRadius' in animation.frames[0]);
+  assert.ok(radiusAnimation, 'radius animation should live on the inner paper');
+  assert.deepEqual(Object.keys(radiusAnimation.frames[0]).filter((key) => key !== 'offset'), ['borderRadius']);
+});
+
+test('reduced motion skips sparks and keeps the flat reveal', async () => {
   const source = await fs.readFile(new URL('../content-add-animation.js', import.meta.url), 'utf8');
   const harness = createHarness();
   harness.context.matchMedia = () => ({ matches: true });
@@ -118,5 +159,8 @@ test('reduced motion skips sparks and uses the short cleanup timer', async () =>
   harness.getMessageListener()({ type: 'playAddAnimation', animationId: 'reduced', label: 'Reduced' });
 
   const delays = [...harness.timers.values()].map((timer) => timer.delay);
-  assert.deepEqual(delays, [520]);
+  assert.deepEqual(delays, [1600]);
+
+  const plane = animationLayers(harness.document)[0].children[1];
+  assert.equal(plane.animations[0].options.duration, 460);
 });

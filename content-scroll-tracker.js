@@ -6,6 +6,11 @@
 
   let maxScrollPercent = 0;
   let restored = false;
+  let lastReportAt = 0;
+  let pendingTimer = null;
+
+  // 进度推送不能太密：后台每次都要写存储并通知侧边栏，过密会让列表不断重排。
+  const REPORT_INTERVAL_MS = 400;
 
   function getScrollPercent() {
     const scrollHeight = Math.max(
@@ -18,21 +23,42 @@
     return Math.min(100, Math.round((window.scrollY / maxScroll) * 100));
   }
 
+  function sendScrollUpdate() {
+    if (pendingTimer !== null) {
+      clearTimeout(pendingTimer);
+      pendingTimer = null;
+    }
+    lastReportAt = Date.now();
+    try {
+      chrome.runtime.sendMessage({
+        type: 'scrollUpdate',
+        percent: maxScrollPercent,
+        scrollY: window.scrollY,
+        pageUrl: window.location.href,
+      });
+    } catch (e) {
+      // 扩展上下文可能已销毁
+    }
+  }
+
   function reportScroll(force = false) {
     const percent = getScrollPercent();
-    if (percent > maxScrollPercent || force) {
-      maxScrollPercent = percent;
-      try {
-        chrome.runtime.sendMessage({
-          type: 'scrollUpdate',
-          percent: maxScrollPercent,
-          scrollY: window.scrollY,
-          pageUrl: window.location.href,
-        });
-      } catch (e) {
-        // 扩展上下文可能已销毁
-      }
+    if (percent <= maxScrollPercent && !force) return;
+    maxScrollPercent = Math.max(maxScrollPercent, percent);
+    if (force) {
+      sendScrollUpdate();
+      return;
     }
+    const elapsed = Date.now() - lastReportAt;
+    if (elapsed >= REPORT_INTERVAL_MS) {
+      sendScrollUpdate();
+      return;
+    }
+    if (pendingTimer !== null) return;
+    pendingTimer = setTimeout(() => {
+      pendingTimer = null;
+      reportScroll();
+    }, REPORT_INTERVAL_MS - elapsed);
   }
 
   function restoreScrollPosition() {

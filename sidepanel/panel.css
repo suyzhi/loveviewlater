@@ -417,16 +417,11 @@ body {
   background: var(--bg);
   cursor: pointer;
   transition: background 0.15s;
-  will-change: transform;
   z-index: 0;
 }
 
 .list-item:hover {
   background: var(--bg-hover);
-}
-
-.list-item:has(.list-item-delete.confirming) {
-  z-index: 1;
 }
 
 .list-item-favicon {
@@ -544,6 +539,11 @@ body {
   opacity: 1;
 }
 
+/* 确认态的行要盖住相邻行，避免被下方行的背景遮挡。 */
+.list-item:has(.list-item-delete.confirming) {
+  z-index: 2;
+}
+
 .list-item-delete.confirming:hover {
   background: var(--danger-hover);
 }
@@ -585,35 +585,9 @@ body {
   opacity: 0.5;
 }
 
+/* 删除线的静态外观由 class 决定，滑动过程交给 JS 的 WAAPI，
+   避免 CSS 关键帧与 WAAPI 抢同一个 background-size。 */
 .list-item.strikethrough .list-item-title {
-  background-image: linear-gradient(
-    to bottom,
-    transparent calc(0.6em - 0.5px),
-    var(--text) calc(0.6em - 0.5px),
-    var(--text) calc(0.6em + 0.5px),
-    transparent calc(0.6em + 0.5px)
-  );
-  background-size: 0% 1.4em;
-  background-repeat: no-repeat;
-  background-position: left top;
-  animation: strikeLineIn 0.35s ease-out forwards;
-}
-
-@keyframes strikeLineIn {
-  from { background-size: 0% 1.4em; }
-  to { background-size: 100% 1.4em; }
-}
-
-@keyframes strikeLineOut {
-  from { background-size: 100% 1.4em; }
-  to { background-size: 0% 1.4em; }
-}
-
-.list-item.strikethrough-reverse .list-item-title {
-  opacity: 0.5;
-}
-
-.list-item.strikethrough-reverse .list-item-title {
   background-image: linear-gradient(
     to bottom,
     transparent calc(0.6em - 0.5px),
@@ -624,7 +598,6 @@ body {
   background-size: 100% 1.4em;
   background-repeat: no-repeat;
   background-position: left top;
-  animation: strikeLineOut 0.35s ease-out forwards;
 }
 
 .list-item.strikethrough .list-item-domain {
@@ -728,5 +701,10 @@ body {
 
   .random-card {
     opacity: 1;
+  }
+
+  /* 不做滑动：直接显示完整删除线。 */
+  .list-item.strikethrough .list-item-title {
+    animation: none;
   }
 }
