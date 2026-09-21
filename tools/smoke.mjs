@@ -154,6 +154,17 @@ async function connect(wsUrl, label) {
   };
 }
 
+// 断言前轮询：无头环境里 rAF/渲染的时序不稳定，固定 sleep 容易假失败。
+async function waitFor(read, predicate, { timeoutMs = 8000, intervalMs = 200 } = {}) {
+  let last;
+  for (let elapsed = 0; elapsed < timeoutMs; elapsed += intervalMs) {
+    last = await read();
+    if (predicate(last)) return last;
+    await wait(intervalMs);
+  }
+  return last;
+}
+
 const worker = await connect(swTarget.webSocketDebuggerUrl, 'sw');
 
 // 1. 内容脚本注入 + 消息通道
@@ -176,18 +187,22 @@ await wait(600);
 check(true, '面板页面已加载');
 
 // 3. 添加当前页：面板 -> 后台 -> 存储 -> 广播
-const addToast = await panel.evalInPage(`(async () => {
-  document.querySelector('#addBtn').click();
-  await new Promise((resolve) => setTimeout(resolve, 900));
-  return document.querySelector('#toast').textContent;
-})()`);
+await panel.evalInPage("document.querySelector('#addBtn').click()");
+const addToast = await waitFor(
+  () => panel.evalInPage("document.querySelector('#toast').textContent"),
+  (text) => /已添加/.test(text),
+);
 check(/已添加/.test(addToast), '添加当前页有反馈', JSON.stringify(addToast));
 const stored = await worker.evalInPage("chrome.storage.local.get('readLaterList').then((result) => JSON.stringify(result.readLaterList.map((item) => ({ title: item.title, url: item.url, source: item.sourceDomain }))))");
 check(stored.includes('测试文章：长文阅读') && stored.includes('127.0.0.1'), '记录已写入存储', stored);
 
 // 4. 面板可见（后台标签页里 rAF 会停摆，侧边栏本身是可见的）后再断言渲染
 await worker.evalInPage(`chrome.tabs.update(${panelTab}, { active: true }).then(() => 'activated')`);
-await wait(1200);
+const rowCount = await waitFor(
+  () => panel.evalInPage("document.querySelectorAll('.list-item').length"),
+  (count) => count === 1,
+);
+check(rowCount === 1, '面板在变成可见后补上渲染', String(rowCount));
 const rendered = JSON.parse(await panel.evalInPage(`JSON.stringify({
   rows: document.querySelectorAll('.list-item').length,
   title: document.querySelector('.list-item-title')?.textContent,
@@ -201,14 +216,15 @@ check(rendered.tag === 'A' && rendered.href === `http://127.0.0.1:${HTTP_PORT}/`
 check(/127\.0\.0\.1/.test(rendered.domain || ''), '域名/时间行不是空的', JSON.stringify(rendered.domain));
 
 // 5. 标记已读：面板 -> 后台 -> 存储 + 行样式
-const struck = JSON.parse(await panel.evalInPage(`(async () => {
-  document.querySelector('.list-item-read').click();
-  await new Promise((resolve) => setTimeout(resolve, 800));
-  return JSON.stringify({
-    cls: document.querySelector('.list-item').classList.contains('strikethrough'),
-    checked: document.querySelector('.list-item-read').checked,
-  });
-})()`));
+await panel.evalInPage("document.querySelector('.list-item-read').click()");
+await waitFor(
+  () => panel.evalInPage("document.querySelector('.list-item')?.classList.contains('strikethrough')"),
+  (struck) => struck === true,
+);
+const struck = JSON.parse(await panel.evalInPage(`JSON.stringify({
+  cls: document.querySelector('.list-item').classList.contains('strikethrough'),
+  checked: document.querySelector('.list-item-read').checked,
+})`));
 const storedStruck = await worker.evalInPage("chrome.storage.local.get('readLaterList').then((result) => JSON.stringify(result.readLaterList.map((item) => !!item.strikethrough)))");
 check(struck.cls && struck.checked && storedStruck === '[true]', '标记已读同步到存储与 DOM', JSON.stringify(struck) + ' / ' + storedStruck);
 
@@ -228,41 +244,55 @@ const seed = JSON.stringify(Array.from({ length: 250 }, (_, index) => ({
 })));
 await worker.evalInPage(`chrome.storage.local.set({ readLaterList: ${seed} }).then(() => 'seeded')`);
 await panel.evalInPage('location.reload()');
-await wait(2000);
-const paged = JSON.parse(await panel.evalInPage(`(async () => {
-  const before = {
-    rows: document.querySelectorAll('.list-item').length,
-    more: !!document.querySelector('.list-more'),
-    count: document.querySelector('#count').textContent,
-  };
-  document.querySelector('.list-more-btn').click();
-  await new Promise((resolve) => setTimeout(resolve, 900));
-  return JSON.stringify({
-    before,
-    after: { rows: document.querySelectorAll('.list-item').length, more: !!document.querySelector('.list-more') },
-  });
-})()`));
+await waitFor(
+  () => panel.evalInPage("document.querySelectorAll('.list-item').length"),
+  (count) => count === 200,
+);
+const before = JSON.parse(await panel.evalInPage(`JSON.stringify({
+  rows: document.querySelectorAll('.list-item').length,
+  more: !!document.querySelector('.list-more'),
+  count: document.querySelector('#count').textContent,
+})`));
+await panel.evalInPage("document.querySelector('.list-more-btn').click()");
+const afterRows = await waitFor(
+  () => panel.evalInPage("document.querySelectorAll('.list-item').length"),
+  (count) => count === 250,
+);
+const paged = {
+  before,
+  after: {
+    rows: afterRows,
+    more: await panel.evalInPage("!!document.querySelector('.list-more')"),
+  },
+};
 check(paged.before.rows === 200 && paged.before.more, '首屏只渲染 200 行并给出「显示更多」', JSON.stringify(paged.before));
 check(paged.before.count === '共 250 项', '总数按整表统计', paged.before.count);
 check(paged.after.rows === 250 && !paged.after.more, '点「显示更多」后补齐 250 行', JSON.stringify(paged.after));
 
 // 7. 筛选 + 搜索
-const filtered = JSON.parse(await panel.evalInPage(`(async () => {
+await panel.evalInPage(`(() => {
   const filter = document.querySelector('#filterSelect');
   filter.value = 'inProgress';
   filter.dispatchEvent(new Event('change'));
-  await new Promise((resolve) => setTimeout(resolve, 500));
-  const inProgress = document.querySelectorAll('.list-item').length;
+})()`);
+const inProgressRows = await waitFor(
+  () => panel.evalInPage("document.querySelectorAll('.list-item').length"),
+  (count) => count === 84,
+);
+await panel.evalInPage(`(() => {
   const search = document.querySelector('#searchInput');
   search.value = '种子文章 249';
   search.dispatchEvent(new Event('input'));
-  await new Promise((resolve) => setTimeout(resolve, 700));
-  return JSON.stringify({
-    inProgress,
-    searched: document.querySelectorAll('.list-item').length,
-    count: document.querySelector('#count').textContent,
-  });
-})()`));
+})()`);
+const searchedRows = await waitFor(
+  () => panel.evalInPage("document.querySelectorAll('.list-item').length"),
+  (count) => count === 1,
+);
+const filtered = {
+  inProgress: inProgressRows,
+  searched: searchedRows,
+  count: await panel.evalInPage("document.querySelector('#count').textContent"),
+};
 check(filtered.inProgress === 84 && filtered.searched === 1, '筛选与搜索生效', JSON.stringify(filtered));
 
 // 8. 进度条
