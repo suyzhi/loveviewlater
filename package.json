@@ -1,0 +1,15 @@
+{
+  "name": "loveviewlater",
+  "version": "1.2.0",
+  "private": true,
+  "type": "module",
+  "description": "稍后再看：在浏览器侧边栏管理稍后再看列表的扩展（Manifest V3）",
+  "scripts": {
+    "test": "node --test tests/*.test.mjs",
+    "lint": "eslint .",
+    "check": "npm run lint && npm test"
+  },
+  "devDependencies": {
+    "eslint": "^9.39.5"
+  }
+}

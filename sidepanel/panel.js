@@ -1,10 +1,23 @@
 import {
   EXPORT_VERSION,
   IMPORT_MAX_BYTES,
+  PROGRESS_SENSITIVE_FILTERS,
+  PROGRESS_SENSITIVE_SORTS,
   getDomain,
   getRandomPickPool,
+  itemProgress,
+  itemSourceText,
+  itemsSignature,
   pickWeightedOldItems,
+  selectVisibleItems,
 } from '../core.mjs';
+import {
+  PANEL_CLOSE_FALLBACK_MS,
+  ROW_PAGE_SIZE,
+  SEARCH_RENDER_DELAY_MS,
+  TOAST_DURATION_MS,
+  VIEW_STATE_KEY,
+} from '../constants.mjs';
 
 const elements = {
   list: document.getElementById('list'),
@@ -36,9 +49,12 @@ const viewState = {
   query: '',
   filter: 'all',
   sort: 'addedDesc',
+  pageSize: ROW_PAGE_SIZE,
 };
 
-const SEARCH_RENDER_DELAY = 180;
+const RECONNECT_MIN_DELAY_MS = 1000;
+const RECONNECT_MAX_DELAY_MS = 30_000;
+const PICKER_FADE_MS = 180;
 
 let toastTimer = null;
 let pendingDelete = null;
@@ -48,12 +64,15 @@ let resizeAnimationFrame = null;
 let closingPanel = false;
 let panelPort = null;
 let panelWindowId = null;
+let reconnectTimer = null;
+let reconnectDelay = RECONNECT_MIN_DELAY_MS;
 let randomPickerTimer = null;
 let searchRenderTimer = null;
 let queuedFrame = 0;
 let frameQueue = [];
 let renderedSignature = null;
 const randomSessionSeen = new Set();
+const armedButtons = new Set();
 
 // 每一行的动画可能同时在跑，按 id 收敛，避免同一元素叠加多个动画。
 const rowAnimations = new Map();
@@ -74,6 +93,11 @@ function prefersReducedMotion() {
   return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 }
 
+function progressSensitiveView() {
+  return PROGRESS_SENSITIVE_FILTERS.includes(viewState.filter)
+    || PROGRESS_SENSITIVE_SORTS.includes(viewState.sort);
+}
+
 function formatTime(ts) {
   const now = Date.now();
   const diff = now - ts;
@@ -88,21 +112,21 @@ function formatTime(ts) {
 }
 
 function sourceText(item) {
-  return item.sourceDomain || getDomain(item.sourceUrl || item.url);
+  return itemSourceText(item);
 }
 
 function getProgress(item) {
-  return Math.min(100, Math.max(0, item.scrollPercent || 0));
+  return itemProgress(item);
 }
 
-function showToast(message) {
+function showToast(message, duration = TOAST_DURATION_MS) {
   if (!elements.toast) return;
   elements.toast.textContent = message;
   elements.toast.classList.add('show');
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => {
     elements.toast.classList.remove('show');
-  }, 2200);
+  }, duration);
 }
 
 function restartPanelEnterAnimation() {
@@ -118,6 +142,8 @@ function restartPanelEnterAnimation() {
 function closePanelWithAnimation() {
   if (closingPanel) return;
   closingPanel = true;
+  clearTimeout(reconnectTimer);
+  reconnectTimer = null;
 
   const app = document.getElementById('app');
   app.style.width = `${app.getBoundingClientRect().width}px`;
@@ -138,8 +164,10 @@ function closePanelWithAnimation() {
     finishClose();
   };
   app.addEventListener('transitionend', handleTransitionEnd);
-  setTimeout(finishClose, 460);
+  setTimeout(finishClose, PANEL_CLOSE_FALLBACK_MS);
 }
+
+// —— 命运三选一 ——
 
 function formatBacklogAge(item) {
   const start = item.firstAddedAt || item.addedAt || Date.now();
@@ -200,10 +228,27 @@ function drawRandomChoices() {
     : '随机池已清空';
 }
 
+// 面板打开时把背后的控件设成 inert：Tab 不会再跑到列表里，也不用自己造焦点陷阱。
+function setPickerInert(on) {
+  const background = [
+    document.querySelector('.header'),
+    document.querySelector('.controls'),
+    elements.emptyState,
+    elements.list,
+    elements.footer,
+  ];
+  for (const el of background) {
+    if (!el) continue;
+    if (on) el.setAttribute('inert', '');
+    else el.removeAttribute('inert');
+  }
+}
+
 function openRandomPicker() {
   clearTimeout(randomPickerTimer);
   drawRandomChoices();
   elements.randomPicker.classList.remove('hidden');
+  setPickerInert(true);
   requestAnimationFrame(() => {
     elements.randomPicker.classList.add('show');
     const firstCard = elements.randomCards.querySelector('.random-card');
@@ -214,10 +259,27 @@ function openRandomPicker() {
 function closeRandomPicker() {
   clearTimeout(randomPickerTimer);
   elements.randomPicker.classList.remove('show');
+  setPickerInert(false);
   randomPickerTimer = setTimeout(() => {
     elements.randomPicker.classList.add('hidden');
     elements.randomBtn.focus();
-  }, 180);
+  }, PICKER_FADE_MS);
+}
+
+function trapPickerFocus(event) {
+  if (event.key !== 'Tab') return;
+  const focusables = [...elements.randomPicker.querySelectorAll('button:not([disabled]), [href]')]
+    .filter((el) => el.offsetParent !== null || el === document.activeElement);
+  if (focusables.length === 0) return;
+  const first = focusables[0];
+  const last = focusables[focusables.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
 }
 
 async function openRandomItem(itemId) {
@@ -257,45 +319,23 @@ async function openRandomItem(itemId) {
   }
 }
 
-function matchesFilter(item) {
-  const progress = getProgress(item);
-  if (viewState.filter === 'unread') return !item.strikethrough;
-  if (viewState.filter === 'read') return !!item.strikethrough;
-  if (viewState.filter === 'inProgress') return progress > 0 && progress < 100;
-  if (viewState.filter === 'complete') return progress >= 100;
-  return true;
-}
+// —— 视图（筛选/排序/分页都收敛到 core 的纯函数里） ——
 
-function matchesSearch(item) {
-  const query = viewState.query.trim().toLowerCase();
-  if (!query) return true;
-  const haystack = [
-    item.title,
-    item.url,
-    getDomain(item.url),
-    item.sourceTitle,
-    item.sourceUrl,
-    sourceText(item),
-  ].filter(Boolean).join(' ').toLowerCase();
-  return haystack.includes(query);
-}
-
-function sortItems(items) {
-  const sorted = [...items];
-  sorted.sort((a, b) => {
-    if (viewState.sort === 'addedAsc') return (a.addedAt || 0) - (b.addedAt || 0);
-    if (viewState.sort === 'progressDesc') return getProgress(b) - getProgress(a);
-    if (viewState.sort === 'progressAsc') return getProgress(a) - getProgress(b);
-    if (viewState.sort === 'sourceAsc') {
-      return sourceText(a).localeCompare(sourceText(b), 'zh-CN') || (b.addedAt || 0) - (a.addedAt || 0);
-    }
-    return (b.addedAt || 0) - (a.addedAt || 0);
+function currentView() {
+  return selectVisibleItems(viewState.list, {
+    query: viewState.query,
+    filter: viewState.filter,
+    sort: viewState.sort,
+    limit: viewState.pageSize,
   });
-  return sorted;
 }
 
-function getVisibleList() {
-  return sortItems(viewState.list.filter(item => matchesFilter(item) && matchesSearch(item)));
+function visibleSignature(view = currentView()) {
+  return itemsSignature(view.items, { progressSensitive: PROGRESS_SENSITIVE_SORTS.includes(viewState.sort) });
+}
+
+function resetPaging() {
+  viewState.pageSize = ROW_PAGE_SIZE;
 }
 
 function getListItemRects() {
@@ -304,13 +344,6 @@ function getListItemRects() {
     rects.set(el.dataset.id, el.getBoundingClientRect());
   });
   return rects;
-}
-
-function visibleSignature() {
-  const progressSensitive = ['progressAsc', 'progressDesc'].includes(viewState.sort);
-  return getVisibleList()
-    .map((item) => (progressSensitive ? `${item.id}:${getProgress(item)}` : item.id))
-    .join(',');
 }
 
 function rowAnimation(id) {
@@ -469,6 +502,14 @@ function animateItemsBelowResize(fromRects, changedRects) {
   observedListRects = getListItemRects();
 }
 
+// —— 行 DOM ——
+
+// 后台广播会送来新的对象副本，闭包里捕获的 item 可能已经过期
+// （比如滚动进度），所以打开动作一律按 id 取当前副本。
+function currentItem(id, fallback) {
+  return viewState.list.find((candidate) => candidate.id === id) || fallback;
+}
+
 function createRow(item) {
   const li = document.createElement('li');
   li.className = 'list-item';
@@ -492,9 +533,19 @@ function createRow(item) {
   const content = document.createElement('div');
   content.className = 'list-item-content';
 
-  const titleEl = document.createElement('div');
+  // 标题是真的 <a>：键盘可以聚焦打开，中键/Ctrl+点击交给浏览器新开标签页，
+  // 普通左键才走后台打开（这样才有进度追踪）。
+  const titleEl = document.createElement('a');
   titleEl.className = 'list-item-title';
+  titleEl.href = item.url;
+  titleEl.rel = 'noreferrer';
   titleEl.textContent = item.title || item.url;
+  titleEl.addEventListener('click', (e) => {
+    if (e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    openItem(currentItem(item.id, item));
+  });
 
   const domainEl = document.createElement('div');
   domainEl.className = 'list-item-domain';
@@ -508,13 +559,13 @@ function createRow(item) {
   sourceEl.tabIndex = 0;
   sourceEl.addEventListener('click', (e) => {
     e.stopPropagation();
-    openSource(item);
+    openSource(currentItem(item.id, item));
   });
   sourceEl.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault();
       e.stopPropagation();
-      openSource(item);
+      openSource(currentItem(item.id, item));
     }
   });
   content.appendChild(sourceEl);
@@ -569,7 +620,7 @@ function createRow(item) {
   li.appendChild(content);
   li.appendChild(actions);
 
-  li.addEventListener('click', () => openItem(item));
+  li.addEventListener('click', () => openItem(currentItem(item.id, item)));
 
   li._readLater = { content, titleEl, domainEl, sourceEl, readCheckbox, deleteBtn, cancelDeleteBtn };
   return li;
@@ -663,9 +714,13 @@ function paintRow(li, item) {
   const state = rowStates.get(li) || {};
   const title = item.title || item.url;
   if (row.titleEl.textContent !== title) row.titleEl.textContent = title;
-  row.sourceEl.textContent = `来源 ${sourceText(item) || '未知'}`;
-  row.sourceEl.title = item.sourceUrl ? `打开来源：${item.sourceUrl}` : '打开来源';
-  row.readCheckbox.checked = !!item.strikethrough;
+  const sourceLabel = `来源 ${sourceText(item) || '未知'}`;
+  if (row.sourceEl.textContent !== sourceLabel) row.sourceEl.textContent = sourceLabel;
+  const sourceTitle = item.sourceUrl ? `打开来源：${item.sourceUrl}` : '打开来源';
+  if (row.sourceEl.title !== sourceTitle) row.sourceEl.title = sourceTitle;
+  if (row.readCheckbox.checked !== !!item.strikethrough) {
+    row.readCheckbox.checked = !!item.strikethrough;
+  }
   if (state.percent !== item.scrollPercent) {
     paintProgress(row, li, item);
   }
@@ -686,21 +741,30 @@ function patchRow(li, item) {
   return li;
 }
 
-function updateCount() {
-  const visibleCount = getVisibleList().length;
+function updateCount(total = null) {
+  const visibleCount = total ?? currentView().total;
   elements.count.textContent = visibleCount === viewState.list.length
     ? `共 ${viewState.list.length} 项`
     : `显示 ${visibleCount} / 共 ${viewState.list.length} 项`;
 }
 
 function openItem(item) {
+  if (!item) return;
   chrome.runtime.sendMessage({
     type: 'openItem',
     url: item.url,
     itemId: item.id,
     scrollY: item.scrollY || 0,
     scrollPercent: item.scrollPercent || 0,
+  }).catch((error) => {
+    showToast(error?.message || '无法打开页面');
   });
+}
+
+function openSource(item) {
+  const url = item?.sourceUrl || item?.url;
+  if (!url) return;
+  chrome.tabs.create({ url, active: true });
 }
 
 function armDeleteButton(itemId) {
@@ -743,10 +807,32 @@ function resetPendingDelete(exceptItemId = null) {
   pendingDelete = null;
 }
 
-function openSource(item) {
-  const url = item.sourceUrl || item.url;
-  if (!url) return;
-  chrome.tabs.create({ url, active: true });
+// alert/confirm 在侧边栏里会挡住整个界面：两步点击按钮代替。
+function createTwoStepButton(button, { label, confirmLabel, timeoutMs = 3000, onConfirm }) {
+  let timer = null;
+  const reset = () => {
+    if (timer !== null) clearTimeout(timer);
+    timer = null;
+    button.textContent = label;
+    button.classList.remove('confirming');
+  };
+  button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    if (timer !== null) {
+      reset();
+      onConfirm();
+      return;
+    }
+    button.textContent = confirmLabel;
+    button.classList.add('confirming');
+    timer = setTimeout(reset, timeoutMs);
+  });
+  armedButtons.add(reset);
+  return reset;
+}
+
+function resetArmedButtons() {
+  for (const reset of armedButtons) reset();
 }
 
 function updateEmptyState(visibleCount, totalCount) {
@@ -773,18 +859,35 @@ function renderEmptyList() {
   elements.count.textContent = viewState.list.length ? `显示 0 / 共 ${viewState.list.length} 项` : '';
 }
 
+function createMoreRow(hiddenCount) {
+  const li = document.createElement('li');
+  li.className = 'list-more';
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'list-more-btn';
+  button.textContent = `显示更多（还有 ${hiddenCount} 项）`;
+  button.addEventListener('click', (event) => {
+    event.stopPropagation();
+    viewState.pageSize += ROW_PAGE_SIZE;
+    renderList();
+  });
+  li.appendChild(button);
+  return li;
+}
+
 // keyed 复用：条目 DOM 只创建一次，筛选/排序/进度更新不再推倒重来。
 function renderList(list = viewState.list) {
   viewState.list = list;
-  const visibleList = getVisibleList();
+  const view = currentView();
+  const visibleList = view.items;
   if (visibleList.length === 0) {
     renderEmptyList();
     return;
   }
 
-  const signature = visibleSignature();
-  if (signature === renderedSignature && elements.list.children.length === visibleList.length) {
-    updateCount();
+  const signature = visibleSignature(view);
+  if (signature === renderedSignature) {
+    updateCount(view.total);
     return;
   }
 
@@ -792,7 +895,14 @@ function renderList(list = viewState.list) {
   const before = getListItemRects();
 
   const existing = new Map();
-  for (const el of elements.list.children) existing.set(el.dataset.id, el);
+  for (const el of [...elements.list.children]) {
+    const id = el.dataset.id;
+    if (!id) {
+      el.remove(); // 上一轮的分页哨兵
+      continue;
+    }
+    existing.set(id, el);
+  }
 
   const orderedNodes = visibleList.map((item) => {
     const previous = existing.get(item.id);
@@ -804,10 +914,22 @@ function renderList(list = viewState.list) {
   });
 
   queueFrame(() => {
-    elements.list.append(...orderedNodes);
+    // 只移动真正错位的节点：append(...nodes) 等价于把每个节点都 remove + insert，
+    // 既触发整表样式重算，也会打断正在跑的 WAAPI 动画。
+    let cursor = elements.list.firstChild;
+    for (const el of orderedNodes) {
+      if (cursor === el) {
+        cursor = cursor.nextSibling;
+        continue;
+      }
+      elements.list.insertBefore(el, cursor);
+    }
     for (const el of existing.values()) {
       clearRowAnimations(el.dataset.id);
       el.remove();
+    }
+    if (view.total > orderedNodes.length) {
+      elements.list.appendChild(createMoreRow(view.total - orderedNodes.length));
     }
     for (const el of orderedNodes) {
       const from = before.get(el.dataset.id);
@@ -821,7 +943,7 @@ function renderList(list = viewState.list) {
     }
     renderedSignature = signature;
     updateEmptyState(orderedNodes.length, viewState.list.length);
-    updateCount();
+    updateCount(view.total);
     observeListLayout();
   });
 }
@@ -832,7 +954,7 @@ function scheduleSearchRender() {
     searchRenderTimer = null;
     flushFrameQueue();
     renderList();
-  }, SEARCH_RENDER_DELAY);
+  }, SEARCH_RENDER_DELAY_MS);
 }
 
 async function toggleStrikethrough(id) {
@@ -848,7 +970,7 @@ async function toggleStrikethrough(id) {
   }
 
   setRowStruck(li, !!item.strikethrough, { animate: true });
-  if (viewState.filter !== 'all' || ['progressAsc', 'progressDesc'].includes(viewState.sort)) {
+  if (viewState.filter !== 'all' || PROGRESS_SENSITIVE_SORTS.includes(viewState.sort)) {
     renderList(result.list);
     return;
   }
@@ -867,22 +989,35 @@ async function addCurrentTab() {
 
 async function clearAll() {
   if (viewState.list.length === 0) return;
-  if (!confirm('确定清空全部稍后再看列表？')) return;
-  const result = await sendAction('list:clear', { windowId: panelWindowId });
-  renderList(result.list);
-  showToast('已清空');
+  try {
+    const result = await sendAction('list:clear', { windowId: panelWindowId });
+    viewState.list = result.list;
+    resetPaging();
+    renderList(result.list);
+    showToast('已清空');
+  } catch (error) {
+    showToast(error.message);
+  }
 }
 
 async function exportData() {
-  const list = await getList();
-  if (list.length === 0) { alert('列表为空，无需导出'); return; }
-  const blob = new Blob([JSON.stringify({ version: EXPORT_VERSION, exportedAt: Date.now(), list }, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = `稍后再看备份_${new Date().toISOString().slice(0, 10)}.json`;
-  a.click();
-  URL.revokeObjectURL(url);
+  try {
+    const list = await getList();
+    if (list.length === 0) {
+      showToast('列表为空，无需导出');
+      return;
+    }
+    const blob = new Blob([JSON.stringify({ version: EXPORT_VERSION, exportedAt: Date.now(), list }, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `稍后再看备份_${new Date().toISOString().slice(0, 10)}.json`;
+    a.click();
+    // 立刻回收会让大文件下载中途失败，等浏览器取走再撤销。
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  } catch (error) {
+    showToast(error.message || '导出失败', 4000);
+  }
 }
 
 async function importData(file) {
@@ -891,10 +1026,12 @@ async function importData(file) {
     const text = await file.text();
     const data = JSON.parse(text);
     const result = await sendAction('list:import', { payload: data, windowId: panelWindowId });
+    viewState.list = result.list;
+    resetPaging();
     renderList(result.list);
-    alert(`导入完成：新增 ${result.imported} 项，重复 ${result.duplicate} 项，无效 ${result.invalid} 项`);
+    showToast(`导入完成：新增 ${result.imported} 项，重复 ${result.duplicate} 项，无效 ${result.invalid} 项`, 5000);
   } catch (error) {
-    alert(`导入失败：${error.message || '文件格式不正确'}`);
+    showToast(`导入失败：${error.message || '文件格式不正确'}`, 5000);
   }
 }
 
@@ -912,6 +1049,33 @@ function patchProgressRow(itemId) {
   }
 }
 
+// —— 视图状态持久化 ——
+
+const FILTER_VALUES = new Set([...elements.filterSelect.options].map((option) => option.value));
+const SORT_VALUES = new Set([...elements.sortSelect.options].map((option) => option.value));
+
+async function loadViewState() {
+  try {
+    const stored = await chrome.storage.local.get({ [VIEW_STATE_KEY]: null });
+    const saved = stored[VIEW_STATE_KEY];
+    if (!saved || typeof saved !== 'object') return;
+    if (FILTER_VALUES.has(saved.filter)) viewState.filter = saved.filter;
+    if (SORT_VALUES.has(saved.sort)) viewState.sort = saved.sort;
+    elements.filterSelect.value = viewState.filter;
+    elements.sortSelect.value = viewState.sort;
+  } catch {
+    // 读不到就用默认视图。
+  }
+}
+
+function saveViewState() {
+  chrome.storage.local.set({
+    [VIEW_STATE_KEY]: { filter: viewState.filter, sort: viewState.sort },
+  }).catch(() => {});
+}
+
+// —— 与后台的通道 ——
+
 function handlePanelMessage(msg) {
   if (msg.type === 'closePanel') {
     closePanelWithAnimation();
@@ -928,15 +1092,11 @@ function handlePanelMessage(msg) {
   if (msg.type !== 'scrollProgressUpdated') return;
 
   const itemInState = viewState.list.find(i => i.id === msg.itemId);
-  if (itemInState) {
-    itemInState.scrollPercent = msg.percent;
-    itemInState.scrollY = msg.scrollY;
-  }
   if (!itemInState) return;
+  itemInState.scrollPercent = msg.percent;
+  itemInState.scrollY = msg.scrollY;
 
-  const progressSensitiveView = ['inProgress', 'complete'].includes(viewState.filter)
-    || ['progressAsc', 'progressDesc'].includes(viewState.sort);
-  if (progressSensitiveView) {
+  if (progressSensitiveView()) {
     // 只有可见结果真的变了才重排，滚动过程中的重复进度不再触发整表动画。
     if (visibleSignature() !== renderedSignature) renderList();
     return;
@@ -945,14 +1105,53 @@ function handlePanelMessage(msg) {
   patchProgressRow(msg.itemId);
 }
 
-async function init() {
-  const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
-  panelWindowId = activeTab?.windowId ?? null;
+function connectPanelPort() {
   panelPort = chrome.runtime.connect({ name: 'sidePanel' });
+  panelPort.onMessage.addListener(handlePanelMessage);
+  panelPort.onDisconnect.addListener(scheduleReconnect);
   if (Number.isInteger(panelWindowId)) {
     panelPort.postMessage({ type: 'registerPanel', windowId: panelWindowId });
   }
-  panelPort.onMessage.addListener(handlePanelMessage);
+}
+
+// Service Worker 被回收/更新后端口会断开：重连并重新注册，
+// 否则面板收不到 listUpdated / closePanel，工具栏图标的开关也会失灵。
+function scheduleReconnect() {
+  if (closingPanel || reconnectTimer !== null) return;
+  reconnectTimer = setTimeout(async () => {
+    reconnectTimer = null;
+    try {
+      connectPanelPort();
+      reconnectDelay = RECONNECT_MIN_DELAY_MS;
+      const list = await getList();
+      renderList(list);
+    } catch {
+      reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_DELAY_MS);
+      scheduleReconnect();
+    }
+  }, reconnectDelay);
+}
+
+async function resolvePanelWindowId() {
+  try {
+    const current = await chrome.windows.getCurrent();
+    if (Number.isInteger(current?.id)) return current.id;
+  } catch {
+    // 退回到活动标签页所在的窗口。
+  }
+  try {
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    return tab?.windowId ?? null;
+  } catch {
+    return null;
+  }
+}
+
+async function init() {
+  panelWindowId = await resolvePanelWindowId();
+  connectPanelPort();
+  await loadViewState();
+
   try {
     const list = await getList();
     renderList(list);
@@ -972,27 +1171,40 @@ async function init() {
     drawRandomChoices();
     requestAnimationFrame(() => elements.randomPicker.classList.add('show'));
   });
+  elements.randomPicker.addEventListener('keydown', trapPickerFocus);
   elements.searchInput.addEventListener('input', (e) => {
     viewState.query = e.target.value;
+    resetPaging();
     scheduleSearchRender();
   });
   elements.filterSelect.addEventListener('change', (e) => {
     viewState.filter = e.target.value;
+    resetPaging();
     renderList();
+    saveViewState();
   });
   elements.sortSelect.addEventListener('change', (e) => {
     viewState.sort = e.target.value;
+    resetPaging();
     renderList();
+    saveViewState();
   });
-  document.addEventListener('click', () => resetPendingDelete());
-  elements.clearBtn.addEventListener('click', clearAll);
+  document.addEventListener('click', () => {
+    resetPendingDelete();
+    resetArmedButtons();
+  });
+  createTwoStepButton(elements.clearBtn, {
+    label: '清空全部',
+    confirmLabel: '确认清空？',
+    onConfirm: clearAll,
+  });
+  createTwoStepButton(elements.reloadBtn, {
+    label: '🔄',
+    confirmLabel: '确认重载？',
+    onConfirm: () => chrome.runtime.reload(),
+  });
   elements.exportBtn.addEventListener('click', exportData);
   elements.importBtn.addEventListener('click', () => elements.importFileInput.click());
-  elements.reloadBtn.addEventListener('click', () => {
-    if (confirm('重新加载扩展以应用更改？侧边栏会关闭，重新点击图标即可打开。')) {
-      chrome.runtime.reload();
-    }
-  });
   elements.importFileInput.addEventListener('change', (e) => {
     if (e.target.files[0]) { importData(e.target.files[0]); e.target.value = ''; }
   });

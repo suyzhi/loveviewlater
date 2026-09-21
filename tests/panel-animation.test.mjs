@@ -66,10 +66,10 @@ test('scroll progress no longer re-sorts the list on every update', () => {
 
 test('page-side add animation keeps per-frame paint work off the flight path', () => {
   const source = readFileSync(new URL('../content-add-animation.js', import.meta.url), 'utf8');
-  const path = source.match(/function animatePaperAlongCurve\([\s\S]*?\n  \}\n/);
+  const path = source.match(/function animatePaperAlongCurve\([\s\S]*?\n {2}\}\n/);
   assert.ok(path, 'animatePaperAlongCurve 应该存在');
   // 路径帧里只允许 transform / opacity；圆角动画拆到 paper 上单独跑。
-  const planes = [...path[0].matchAll(/plane\.animate\(([\s\S]*?)\n    \);/g)].map((match) => match[1]);
+  const planes = [...path[0].matchAll(/plane\.animate\(([\s\S]*?)\n {4}\); ?/g)].map((match) => match[1]);
   assert.ok(planes.length > 0, '路径动画应该挂在外层元素上');
   for (const frames of planes) {
     assert.doesNotMatch(frames, /borderRadius/);

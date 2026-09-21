@@ -448,14 +448,24 @@ body {
   min-width: 0;
 }
 
+/* 标题现在是真链接：键盘可聚焦、中键/Ctrl+点击交给浏览器。 */
 .list-item-title {
   display: inline;
+  color: inherit;
   font-size: 13px;
   font-weight: 500;
   word-break: break-word;
   line-height: 1.4;
+  text-decoration: none;
   box-decoration-break: clone;
   -webkit-box-decoration-break: clone;
+}
+
+.list-item-title:focus-visible,
+.list-item-source:focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+  border-radius: 3px;
 }
 
 .list-item-domain {
@@ -633,6 +643,40 @@ body {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+/* 两步确认：清空/重载不再弹 confirm()，第二次点击才真的执行。 */
+.btn-outline.confirming,
+.btn-danger.confirming {
+  border-color: var(--danger);
+  background: var(--danger);
+  color: #fff;
+  font-weight: 600;
+}
+
+.list-more {
+  padding: 10px 16px 16px;
+  text-align: center;
+}
+
+.list-more-btn {
+  width: 100%;
+  padding: 8px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+
+.list-more-btn:hover,
+.list-more-btn:focus-visible {
+  border-color: var(--primary);
+  background: rgba(66, 133, 244, 0.08);
+  color: var(--primary);
 }
 
 .count {
