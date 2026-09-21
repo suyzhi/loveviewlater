@@ -93,9 +93,15 @@ npm install      # 只装 ESLint
 npm test         # 跑全部单测
 npm run lint     # 静态检查
 npm run check    # lint + test
+npm run smoke    # 端到端冒烟：真浏览器加载扩展跑一遍主要流程
 ```
 
-测试不依赖浏览器：`background.js` 用一份 `chrome` 桩直接跑消息路由（含存储写入次数断言），
-内容脚本与面板用 `vm` + 假 DOM 跑，或者断言关键不变量（如「路径动画只允许 transform/opacity」）。
+单测不依赖浏览器：`background.js` 用一份 `chrome` 桩直接跑消息路由（含存储写入次数断言），
+`core.mjs` 的视图/存储逻辑是纯函数，`tests/wiring.test.mjs` 负责检查 manifest 引用、元素 id、
+消息类型这些接线关系；面板与内容脚本的动画不变量按源码断言。
+
+`npm run smoke` 会起一个本地页面 + 无头 Chromium 真的加载扩展，验证「添加当前页 → 存储 → 渲染」、
+标记已读、分页、筛选搜索、两步确认，并捕获页面异常。Chrome 137+ 去掉了 `--load-extension`，
+所以脚本按 Edge → Chromium → Chrome for Testing → Chrome 的顺序找浏览器（也可用 `SMOKE_BROWSER` 指定）。
 
 修改后的加载方式：`chrome://extensions` → 刷新扩展，或在侧边栏点 🔄。

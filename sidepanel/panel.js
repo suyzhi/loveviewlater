@@ -680,6 +680,10 @@ function setRowStruck(el, struck, { animate = false } = {}) {
   el.classList.toggle('strikethrough', struck);
 }
 
+// 进度是 0..100 或 undefined（从没读过）；用哨兵值表示「这一行还没画过」，
+// 否则 undefined === undefined 会跳过首次绘制，域名/时间那一行就永远是空的。
+const PERCENT_UNPAINTED = -1;
+
 function paintProgress(row, li, item) {
   const percent = getProgress(item);
   const state = rowStates.get(li);
@@ -729,14 +733,14 @@ function paintRow(li, item) {
 
 function renderRow(item) {
   const li = createRow(item);
-  rowStates.set(li, { struck: !!item.strikethrough, percent: undefined });
+  rowStates.set(li, { struck: !!item.strikethrough, percent: PERCENT_UNPAINTED });
   paintRow(li, item);
   return li;
 }
 
 function patchRow(li, item) {
   const state = rowStates.get(li);
-  if (state) state.percent = undefined;
+  if (state) state.percent = PERCENT_UNPAINTED;
   paintRow(li, item);
   return li;
 }

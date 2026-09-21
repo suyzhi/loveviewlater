@@ -7,7 +7,8 @@
   "scripts": {
     "test": "node --test tests/*.test.mjs",
     "lint": "eslint .",
-    "check": "npm run lint && npm test"
+    "check": "npm run lint && npm test",
+    "smoke": "node tools/smoke.mjs"
   },
   "devDependencies": {
     "eslint": "^9.39.5"

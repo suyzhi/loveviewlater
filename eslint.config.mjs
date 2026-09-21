@@ -60,13 +60,14 @@ export default [
     },
   },
   {
-    files: ['tests/**/*.mjs'],
+    files: ['tests/**/*.mjs', 'tools/**/*.mjs'],
     languageOptions: {
       globals: {
         ...browserGlobals,
         process: 'readonly',
         setImmediate: 'readonly',
         Buffer: 'readonly',
+        WebSocket: 'readonly',
       },
     },
   },
