@@ -266,14 +266,12 @@ const paged = {
   },
 };
 check(paged.before.rows === 200 && paged.before.more, '首屏只渲染 200 行并给出「显示更多」', JSON.stringify(paged.before));
-check(paged.before.count === '共 250 项', '总数按整表统计', paged.before.count);
+check(paged.before.count === '共 250 篇', '总数按整表统计', paged.before.count);
 check(paged.after.rows === 250 && !paged.after.more, '点「显示更多」后补齐 250 行', JSON.stringify(paged.after));
 
 // 7. 筛选 + 搜索
 await panel.evalInPage(`(() => {
-  const filter = document.querySelector('#filterSelect');
-  filter.value = 'inProgress';
-  filter.dispatchEvent(new Event('change'));
+  document.querySelector('.filter-tab[data-filter="inProgress"]').click();
 })()`);
 const inProgressRows = await waitFor(
   () => panel.evalInPage("document.querySelectorAll('.list-item').length"),
@@ -304,10 +302,10 @@ const twoStep = JSON.parse(await panel.evalInPage(`(async () => {
   const button = document.querySelector('#clearBtn');
   button.click();
   await new Promise((resolve) => setTimeout(resolve, 200));
-  const armed = { text: button.textContent, confirming: button.classList.contains('confirming') };
+  const armed = { text: button.textContent.trim(), confirming: button.classList.contains('confirming') };
   document.querySelector('#list').click();
   await new Promise((resolve) => setTimeout(resolve, 200));
-  return JSON.stringify({ armed, reset: button.textContent });
+  return JSON.stringify({ armed, reset: button.textContent.trim() });
 })()`));
 check(twoStep.armed.confirming && twoStep.armed.text === '确认清空？', '第一次点击进入确认态', JSON.stringify(twoStep.armed));
 check(twoStep.reset === '清空全部', '点别处会取消确认', twoStep.reset);

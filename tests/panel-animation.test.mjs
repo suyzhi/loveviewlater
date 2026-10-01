@@ -8,6 +8,11 @@ const panelStyles = readFileSync(new URL('../sidepanel/panel.css', import.meta.u
 test('read titles remain plain text instead of fixed per-line DOM', () => {
   assert.doesNotMatch(panelScript, /splitStrikethroughLines|createElement\(['"]s['"]\)/);
   assert.match(panelStyles, /box-decoration-break:\s*clone/);
+  // 标题的父容器若是 flex/grid，标题会被块级化，删除线只画在第一行。
+  const content = panelStyles.match(/\.list-item-content\s*\{[^}]*\}/);
+  assert.ok(content, '.list-item-content 规则应该存在');
+  assert.doesNotMatch(content[0], /display:\s*(inline-)?(flex|grid)/);
+  assert.match(panelStyles, /\.list-item-title\s*\{[^}]*display:\s*inline;/);
 });
 
 test('panel entrance animation is explicitly replayed when the panel becomes visible', () => {
@@ -32,7 +37,7 @@ test('row animations are coalesced into one frame and cannot stack on the same r
 });
 
 test('row flipping only changes transform and skips work already in flight', () => {
-  const flip = panelScript.match(/function shiftAnimation\(el, dy\)[\s\S]*?\n\}/);
+  const flip = panelScript.match(/function shiftAnimation\(el, dy[^)]*\)[\s\S]*?\n\}/);
   assert.ok(flip, 'shiftAnimation 应该存在');
   assert.match(flip[0], /translateY\(/);
   assert.doesNotMatch(flip[0], /translate\(/);
@@ -66,17 +71,47 @@ test('scroll progress no longer re-sorts the list on every update', () => {
 
 test('page-side add animation keeps per-frame paint work off the flight path', () => {
   const source = readFileSync(new URL('../content-add-animation.js', import.meta.url), 'utf8');
-  const path = source.match(/function animatePaperAlongCurve\([\s\S]*?\n {2}\}\n/);
-  assert.ok(path, 'animatePaperAlongCurve 应该存在');
-  // 路径帧里只允许 transform / opacity；圆角动画拆到 paper 上单独跑。
-  const planes = [...path[0].matchAll(/plane\.animate\(([\s\S]*?)\n {4}\); ?/g)].map((match) => match[1]);
-  assert.ok(planes.length > 0, '路径动画应该挂在外层元素上');
-  for (const frames of planes) {
-    assert.doesNotMatch(frames, /borderRadius/);
-    assert.doesNotMatch(frames, /filter|blur\(/);
+  // 帧里不动阴影、圆角、滤镜：大阴影是单独一层，只改它的 opacity。
+  const frames = [...source.matchAll(/\.animate\(\[([\s\S]*?)\], /g)].map((match) => match[1]);
+  assert.ok(frames.length >= 4, '应该抓到各层的关键帧');
+  for (const body of frames) {
+    assert.doesNotMatch(body, /boxShadow|borderRadius|filter|blur\(/);
   }
-  assert.match(path[0], /paper\.animate\(radiusFrames/);
-  // 火花用负延迟一次性派发，不再各自挂独立计时器，也不再逐帧改 box-shadow。
-  assert.doesNotMatch(source, /--spark-delay/);
-  assert.match(source, /duration: 480, delay: i \* 18/);
+  assert.match(source, /\.lift\s*\{[\s\S]*?box-shadow/);
+  // 不再有彩色火花和工具栏光条。
+  assert.doesNotMatch(source, /spark|toolbar-glow/i);
+});
+
+test('panel delays the new row until the page-side card arrives', () => {
+  assert.match(panelScript, /function arrivalAnimation\(el, delay\)/);
+  assert.match(panelScript, /function takeArrival\(nodes\)/);
+  assert.match(panelScript, /shiftAnimation\(el, dy, shiftDelay\)/);
+  const constants = readFileSync(new URL('../constants.mjs', import.meta.url), 'utf8');
+  const content = readFileSync(new URL('../content-add-animation.js', import.meta.url), 'utf8');
+  const shared = Number(/ADD_FLIGHT_ARRIVAL_MS = (\d+)/.exec(constants)[1]);
+  const local = Number(/const ARRIVE_MS = (\d+)/.exec(content)[1]);
+  assert.equal(local, shared, '内容脚本与面板对「卡片几时到达」的约定要一致');
+});
+
+test('multi-line strikethrough draws line by line, then settles back to clone', () => {
+  const strike = panelScript.match(/function playStrikeAnimation\(li, struck\)[\s\S]*?\n\}/)[0];
+  // slice 把折行的几段当成一长条：宽度增长时自然是逐行划过去。
+  assert.match(strike, /setProperty\('box-decoration-break', 'slice'\)/);
+  assert.match(strike, /getClientRects\(\)\.length/);
+  const clear = panelScript.match(/function clearStrikeInline\(titleEl\)[\s\S]*?\n\}/)[0];
+  assert.match(clear, /removeProperty\('box-decoration-break'\)/);
+});
+
+test('closing keeps the text-reflow collapse and hands the frame back to the browser', () => {
+  // 「文字流」：宽度过渡收到 0，文字逐帧重新折行——这是刻意保留的效果，别换成整体平移。
+  assert.match(panelStyles, /#app\s*\{[^}]*transition:[^}]*width 0\.42s/);
+  assert.match(panelScript, /app\.style\.width = '0px'/);
+  assert.match(panelScript, /e\.propertyName === 'width'/);
+  assert.match(panelScript, /chrome\.sidePanel\.close\(\{ windowId: panelWindowId \}\)/);
+});
+
+test('current-page card repaints even when callers already swapped viewState.list', () => {
+  const render = panelScript.match(/function renderList\(list = viewState\.list\) \{[\s\S]*?\n\}/)[0];
+  assert.match(render, /list !== savedUrls\.list/);
+  assert.doesNotMatch(render, /list !== viewState\.list/);
 });

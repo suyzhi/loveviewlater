@@ -9,18 +9,19 @@ class FakeElement {
     this.document = document;
     this.children = [];
     this.dataset = {};
+    this.attributes = {};
     this.style = { setProperty() {} };
     this.className = '';
     this.textContent = '';
     this.parent = null;
     this.removed = false;
     this.animations = [];
+    this.shadowRoot = null;
   }
 
   appendChild(child) {
     child.parent = this;
     this.children.push(child);
-    if (child.id) this.document.elementsById.set(child.id, child);
     return child;
   }
 
@@ -28,13 +29,18 @@ class FakeElement {
     children.forEach((child) => this.appendChild(child));
   }
 
+  setAttribute(name, value) {
+    this.attributes[name] = String(value);
+  }
+
+  attachShadow() {
+    this.shadowRoot = new FakeElement('#shadow-root', this.document);
+    return this.shadowRoot;
+  }
+
   remove() {
     this.removed = true;
     if (this.parent) this.parent.children = this.parent.children.filter((child) => child !== this);
-  }
-
-  getBoundingClientRect() {
-    return { width: 148, height: 42, left: 0, top: 0, right: 148, bottom: 42 };
   }
 
   animate(frames = [], options = {}) {
@@ -92,75 +98,139 @@ function createHarness() {
   };
 }
 
-function animationLayers(document) {
+function flightHosts(document) {
   const roots = [document.body, document.documentElement].filter(Boolean);
-  return roots.flatMap((root) => root.children.filter((child) => child.className === 'read-later-catch-layer'));
+  return roots.flatMap((root) => root.children.filter((child) => child.tagName === 'read-later-flight'));
 }
 
-// 纸张被包在 .read-later-paper-plane 里：外层只跑位移，内层只跑圆角/形变。
-function paperOf(layer) {
-  const plane = layer.children.find((child) => child.className === 'read-later-paper-plane');
-  return plane?.children.find((child) => child.className === 'read-later-paper');
+function find(node, className) {
+  if (!node) return null;
+  if (node.className === className) return node;
+  for (const child of [...(node.shadowRoot ? [node.shadowRoot] : []), ...node.children]) {
+    const hit = find(child, className);
+    if (hit) return hit;
+  }
+  return null;
 }
 
-test('animation runtime keeps only the newest layer and uses duplicate copy', async () => {
+async function loadRuntime({ reducedMotion = false } = {}) {
   const source = await fs.readFile(new URL('../content-add-animation.js', import.meta.url), 'utf8');
   const harness = createHarness();
+  if (reducedMotion) harness.context.matchMedia = () => ({ matches: true });
   vm.runInContext(source, harness.context);
   const listener = harness.getMessageListener();
   assert.equal(typeof listener, 'function');
+  // 每次播放都必须回话 { played: true }：后台靠它判断要不要注入脚本。
+  const play = (message) => {
+    let response;
+    listener(message, {}, (value) => { response = value; });
+    assert.equal(response?.played, true);
+  };
+  return { harness, play };
+}
 
-  listener({ type: 'playAddAnimation', animationId: 'first', label: 'First', x: 10, y: 10 });
-  const firstLayer = animationLayers(harness.document)[0];
-  assert.equal(animationLayers(harness.document).length, 1);
-  assert.equal(firstLayer.dataset.animationId, 'first');
-  assert.equal(paperOf(firstLayer).children[1].textContent, '收进稍后再看');
+// translate3d(Xpx, Ypx, 0) → [X, Y]（不用的轴写成裸 0）
+function translateOf(frame) {
+  const match = /translate3d\((-?[\d.]+)(?:px)?, (-?[\d.]+)(?:px)?/.exec(frame.transform);
+  return match ? [Number(match[1]), Number(match[2])] : null;
+}
 
-  listener({ type: 'playAddAnimation', animationId: 'second', duplicate: true, label: 'Second' });
-  const secondLayer = animationLayers(harness.document)[0];
-  assert.equal(firstLayer.removed, true);
-  assert.equal(animationLayers(harness.document).length, 1);
-  assert.equal(secondLayer.dataset.animationId, 'second');
-  assert.equal(paperOf(secondLayer).children[1].textContent, '已在列表中 · 已置顶');
+test('animation runtime keeps only the newest card and uses duplicate copy', async () => {
+  const { harness, play } = await loadRuntime();
+
+  play({ type: 'playAddAnimation', animationId: 'first', label: 'First', domain: 'example.com', x: 10, y: 10 });
+  const [firstHost] = flightHosts(harness.document);
+  assert.equal(flightHosts(harness.document).length, 1);
+  assert.equal(firstHost.dataset.animationId, 'first');
+  assert.equal(find(firstHost, 'title').textContent, 'First');
+  assert.equal(find(firstHost, 'meta').textContent, 'example.com');
+
+  play({ type: 'playAddAnimation', animationId: 'second', duplicate: true, label: 'Second' });
+  const [secondHost] = flightHosts(harness.document);
+  assert.equal(firstHost.removed, true);
+  assert.equal(flightHosts(harness.document).length, 1);
+  assert.equal(secondHost.dataset.animationId, 'second');
+  assert.equal(find(secondHost, 'meta').textContent, '已在抽屉里 · 已置顶');
 
   const cleanupTimer = [...harness.timers.values()].find((timer) => timer.delay === 1600);
   assert.ok(cleanupTimer);
   cleanupTimer.callback();
-  assert.equal(animationLayers(harness.document).length, 0);
+  assert.equal(flightHosts(harness.document).length, 0);
 });
 
-test('paper motion stays on compositor-friendly properties', async () => {
-  const source = await fs.readFile(new URL('../content-add-animation.js', import.meta.url), 'utf8');
-  const harness = createHarness();
-  vm.runInContext(source, harness.context);
-  harness.getMessageListener()({ type: 'playAddAnimation', animationId: 'perf', label: 'Perf' });
+test('card lives in a shadow root so page CSS cannot restyle it', async () => {
+  const { harness, play } = await loadRuntime();
+  play({ type: 'playAddAnimation', animationId: 'iso', label: 'Iso' });
+  const [host] = flightHosts(harness.document);
+  assert.ok(host.shadowRoot, '卡片应该挂在 Shadow DOM 里');
+  assert.match(host.attributes.style, /all: initial/);
+  const style = host.shadowRoot.children.find((child) => child.tagName === 'style');
+  assert.match(style.textContent, /\.title\s*\{[\s\S]*text-overflow: ellipsis/);
+  assert.match(style.textContent, /\.meta\s*\{/);
+});
 
-  const plane = animationLayers(harness.document)[0].children[1];
-  const paper = paperOf(animationLayers(harness.document)[0]);
-  assert.equal(plane.animations.length, 1); // 路径只跑 transform / opacity
-  assert.equal(paper.animations.length, 2); // 挤压/拉伸 + 圆角，都在内层
-  // 路径动画的每一帧只允许 transform / opacity，避免逐帧重绘。
-  const allowed = new Set(['transform', 'opacity', 'offset']);
-  for (const frame of plane.animations[0].frames) {
-    assert.ok(Object.keys(frame).every((key) => allowed.has(key)), `unexpected key in ${JSON.stringify(frame)}`);
+test('flight stays on compositor-friendly properties', async () => {
+  const { harness, play } = await loadRuntime();
+  play({ type: 'playAddAnimation', animationId: 'perf', label: 'Perf', panelOpen: true });
+  const [host] = flightHosts(harness.document);
+
+  const allowed = {
+    x: ['transform'],
+    y: ['transform'],
+    card: ['transform', 'opacity'],
+    lift: ['opacity'],
+    slit: ['transform', 'opacity'],
+  };
+  for (const [className, props] of Object.entries(allowed)) {
+    const node = find(host, className);
+    assert.ok(node, `.${className} 应该存在`);
+    assert.equal(node.animations.length, 1, `.${className} 只跑一条动画`);
+    const keys = new Set([...props, 'offset', 'easing']);
+    for (const frame of node.animations[0].frames) {
+      assert.ok(Object.keys(frame).every((key) => keys.has(key)), `.${className} 帧里有多余属性：${JSON.stringify(frame)}`);
+    }
   }
-  assert.ok(plane.animations[0].frames.every((frame) => !('filter' in frame) && !('borderRadius' in frame)));
-  // 圆角单独放在内层元素上。
-  const radiusAnimation = paper.animations.find((animation) => 'borderRadius' in animation.frames[0]);
-  assert.ok(radiusAnimation, 'radius animation should live on the inner paper');
-  assert.deepEqual(Object.keys(radiusAnimation.frames[0]).filter((key) => key !== 'offset'), ['borderRadius']);
+  // 不转圈：旋转角度始终很小。
+  for (const frame of find(host, 'card').animations[0].frames) {
+    const turn = /rotate\((-?[\d.]+)deg\)/.exec(frame.transform);
+    if (turn) assert.ok(Math.abs(Number(turn[1])) <= 3, frame.transform);
+  }
 });
 
-test('reduced motion skips sparks and keeps the flat reveal', async () => {
-  const source = await fs.readFile(new URL('../content-add-animation.js', import.meta.url), 'utf8');
-  const harness = createHarness();
-  harness.context.matchMedia = () => ({ matches: true });
-  vm.runInContext(source, harness.context);
-  harness.getMessageListener()({ type: 'playAddAnimation', animationId: 'reduced', label: 'Reduced' });
+test('with the side panel open the card exits through the right edge at row height', async () => {
+  const { harness, play } = await loadRuntime();
+  play({ type: 'playAddAnimation', animationId: 'open', label: 'Open', panelOpen: true, x: 200, y: 400 });
+  const [host] = flightHosts(harness.document);
+  const xFrames = find(host, 'x').animations[0].frames;
+  const yFrames = find(host, 'y').animations[0].frames;
+  // translate 给的是未缩放卡片的左缘；按 0.72 缩放后，可见左缘要整个越过视口右侧。
+  const width = parseFloat(find(host, 'card').style.width);
+  const visibleLeft = translateOf(xFrames.at(-1))[0] + width / 2 - (width * 0.72) / 2;
+  assert.ok(visibleLeft > harness.context.innerWidth, `最终应在视口右侧之外：${visibleLeft}`);
+  // 弧线：顶点高于起点和落点。
+  const ys = yFrames.map((frame) => translateOf(frame)[1]);
+  assert.ok(Math.min(...ys) < ys[0] && Math.min(...ys) < ys.at(-1), `应该先抬起再落下：${ys}`);
+  assert.ok(find(host, 'slit'), '侧边栏边缘要亮起一道缝');
+});
+
+test('with the side panel closed the card leaves through the top-right corner', async () => {
+  const { harness, play } = await loadRuntime();
+  play({ type: 'playAddAnimation', animationId: 'closed', label: 'Closed', panelOpen: false, x: 200, y: 400 });
+  const [host] = flightHosts(harness.document);
+  const lastY = translateOf(find(host, 'y').animations[0].frames.at(-1))[1];
+  assert.ok(lastY < 0, `最终应在视口顶部之外：${lastY}`);
+  assert.equal(find(host, 'slit'), null);
+  assert.equal(find(host, 'card').animations[0].frames.at(-1).opacity, 0);
+});
+
+test('reduced motion skips the flight and keeps a short fade', async () => {
+  const { harness, play } = await loadRuntime({ reducedMotion: true });
+  play({ type: 'playAddAnimation', animationId: 'reduced', label: 'Reduced', panelOpen: true });
 
   const delays = [...harness.timers.values()].map((timer) => timer.delay);
   assert.deepEqual(delays, [1600]);
-
-  const plane = animationLayers(harness.document)[0].children[1];
-  assert.equal(plane.animations[0].options.duration, 460);
+  const [host] = flightHosts(harness.document);
+  assert.equal(find(host, 'x').animations.length, 0);
+  assert.equal(find(host, 'slit'), null);
+  assert.equal(find(host, 'card').animations[0].options.duration, 460);
 });
