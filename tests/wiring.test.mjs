@@ -96,8 +96,15 @@ test('后台发给页面的消息，内容脚本都监听了', async () => {
   for (const [type, file] of pairs) {
     assert.match(background, new RegExp(`type: '${type}'`), `background 应该发送 ${type}`);
     const source = await read(file);
-    assert.match(source, new RegExp(`type === '${type}'`), `${file} 应该处理 ${type}`);
+    assert.match(source, new RegExp(`type [!=]== '${type}'`), `${file} 应该处理 ${type}`);
   }
+});
+
+test('动画脚本明确回话，后台只认回话而不是「发送没报错」', async () => {
+  // 常驻的 content-context.js 也监听消息，sendMessage 不报错不代表动画脚本在。
+  const [background, animation] = await Promise.all([read('background.js'), read('content-add-animation.js')]);
+  assert.match(animation, /sendResponse\(\{ played: true \}\)/);
+  assert.match(background, /response\?\.played/);
 });
 
 test('按需注入的脚本列表都指向真实文件', async () => {

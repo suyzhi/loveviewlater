@@ -5,9 +5,12 @@ import {
   PROGRESS_SENSITIVE_SORTS,
   getDomain,
   getRandomPickPool,
+  isSupportedUrl,
   itemProgress,
   itemSourceText,
   itemsSignature,
+  matchesItemFilter,
+  normalizeUrl,
   pickWeightedOldItems,
   selectVisibleItems,
 } from '../core.mjs';
@@ -22,9 +25,14 @@ import {
 const elements = {
   list: document.getElementById('list'),
   emptyState: document.getElementById('emptyState'),
-  footer: document.getElementById('footer'),
   count: document.getElementById('count'),
+  backlogAge: document.getElementById('backlogAge'),
+  currentCard: document.getElementById('currentCard'),
+  currentFavicon: document.getElementById('currentFavicon'),
+  currentLabel: document.getElementById('currentLabel'),
+  currentTitle: document.getElementById('currentTitle'),
   addBtn: document.getElementById('addBtn'),
+  addLabel: document.getElementById('addLabel'),
   randomBtn: document.getElementById('randomBtn'),
   randomPicker: document.getElementById('randomPicker'),
   randomCards: document.getElementById('randomCards'),
@@ -33,9 +41,13 @@ const elements = {
   randomPoolCount: document.getElementById('randomPoolCount'),
   randomCloseBtn: document.getElementById('randomCloseBtn'),
   randomRerollBtn: document.getElementById('randomRerollBtn'),
+  searchToggle: document.getElementById('searchToggle'),
+  searchRow: document.getElementById('searchRow'),
   searchInput: document.getElementById('searchInput'),
-  filterSelect: document.getElementById('filterSelect'),
+  filterTabs: document.getElementById('filterTabs'),
   sortSelect: document.getElementById('sortSelect'),
+  moreBtn: document.getElementById('moreBtn'),
+  moreMenu: document.getElementById('moreMenu'),
   clearBtn: document.getElementById('clearBtn'),
   exportBtn: document.getElementById('exportBtn'),
   importBtn: document.getElementById('importBtn'),
@@ -71,6 +83,11 @@ let searchRenderTimer = null;
 let queuedFrame = 0;
 let frameQueue = [];
 let renderedSignature = null;
+// undefined：还没查过当前标签页；null：查不到。
+let currentTab;
+let savedUrls = { list: null, keys: new Set() };
+// 网页里的卡片正在飞过来：这一行的入场（和其他行的让位）要等它落到侧边栏边缘。
+let pendingArrival = null;
 const randomSessionSeen = new Set();
 const armedButtons = new Set();
 
@@ -103,16 +120,41 @@ function formatTime(ts) {
   const diff = now - ts;
   const minutes = Math.floor(diff / 60000);
   if (minutes < 1) return '刚刚';
-  if (minutes < 60) return `${minutes}分钟前`;
+  if (minutes < 60) return `${minutes} 分钟前`;
   const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}小时前`;
+  if (hours < 24) return `${hours} 小时前`;
   const days = Math.floor(hours / 24);
-  if (days < 30) return `${days}天前`;
+  if (days < 30) return `${days} 天前`;
   return new Date(ts).toLocaleDateString('zh-CN');
 }
 
 function sourceText(item) {
   return itemSourceText(item);
+}
+
+const ICON_PATHS = {
+  trash: '<path d="M4 7h16"/><path d="M9.5 7V4.5h5V7"/><path d="M6.5 7l.9 12.5h9.2l.9-12.5"/>',
+};
+
+function icon(name, size = 17) {
+  const template = document.createElement('template');
+  template.innerHTML = `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" `
+    + `stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICON_PATHS[name]}</svg>`;
+  return template.content.firstElementChild;
+}
+
+function faviconLetter(url) {
+  return (getDomain(url)[0] || '?').toUpperCase();
+}
+
+const DAY_MS = 86_400_000;
+
+// 今天 / 本周 / 更早：只在按添加时间排序时分组。
+function addedGroup(ts, now = new Date()) {
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  if (ts >= startOfToday) return '今天';
+  if (ts >= startOfToday - 6 * DAY_MS) return '本周';
+  return '更早';
 }
 
 function getProgress(item) {
@@ -139,31 +181,47 @@ function restartPanelEnterAnimation() {
   app.classList.add('panel-enter');
 }
 
+// 侧边栏外框属于浏览器：走 sidePanel.close()（Chrome 141+ / 新版 Edge）让外框按浏览器自己的流程收起，
+// 老版本没有这个接口就退回 window.close()。
+async function closeSidePanel() {
+  if (chrome.sidePanel?.close && Number.isInteger(panelWindowId)) {
+    try {
+      await chrome.sidePanel.close({ windowId: panelWindowId });
+      return;
+    } catch {
+      // 退回下面的 window.close()。
+    }
+  }
+  window.close();
+}
+
+// 「文字流」收起：宽度从满宽收到 0，文字跟着一路重新折行；收完再交给浏览器关外框。
 function closePanelWithAnimation() {
   if (closingPanel) return;
   closingPanel = true;
   clearTimeout(reconnectTimer);
   reconnectTimer = null;
 
-  const app = document.getElementById('app');
-  app.style.width = `${app.getBoundingClientRect().width}px`;
-  app.getBoundingClientRect();
-  app.classList.add('collapse-out');
-  app.style.width = '0px';
-
   let closed = false;
   const finishClose = () => {
     if (closed) return;
     closed = true;
-    window.close();
+    closeSidePanel();
   };
-  const handleTransitionEnd = (e) => {
-    if (e.target !== app) return;
-    if (e.propertyName !== 'width') return;
-    app.removeEventListener('transitionend', handleTransitionEnd);
+  if (prefersReducedMotion()) {
     finishClose();
-  };
-  app.addEventListener('transitionend', handleTransitionEnd);
+    return;
+  }
+
+  const app = document.getElementById('app');
+  app.classList.remove('panel-enter');
+  app.style.width = `${app.getBoundingClientRect().width}px`;
+  app.getBoundingClientRect();
+  app.classList.add('collapse-out');
+  app.style.width = '0px';
+  app.addEventListener('transitionend', (e) => {
+    if (e.target === app && e.propertyName === 'width') finishClose();
+  });
   setTimeout(finishClose, PANEL_CLOSE_FALLBACK_MS);
 }
 
@@ -173,8 +231,7 @@ function formatBacklogAge(item) {
   const start = item.firstAddedAt || item.addedAt || Date.now();
   const days = Math.max(0, Math.floor((Date.now() - start) / 86400000));
   if (days < 1) return '今天加入';
-  if (days === 1) return '积压 1 天';
-  return `积压 ${days} 天`;
+  return `已等 ${days} 天`;
 }
 
 function renderRandomCard(item, index) {
@@ -186,7 +243,7 @@ function renderRandomCard(item, index) {
 
   const number = document.createElement('span');
   number.className = 'random-card-number';
-  number.textContent = String(index + 1).padStart(2, '0');
+  number.textContent = ['壹', '贰', '叁'][index] || String(index + 1);
   const title = document.createElement('strong');
   title.className = 'random-card-title';
   title.textContent = item.title || item.url;
@@ -194,13 +251,13 @@ function renderRandomCard(item, index) {
   meta.className = 'random-card-meta';
   const progress = getProgress(item);
   meta.textContent = [
-    formatBacklogAge(item),
     getDomain(item.url),
-    progress > 0 ? `已读 ${progress}%` : '还没开始',
-  ].join(' · ');
+    formatBacklogAge(item),
+    progress > 0 ? `读到 ${progress}%` : null,
+  ].filter(Boolean).join(' · ');
   const action = document.createElement('span');
   action.className = 'random-card-action';
-  action.textContent = '就看这篇 →';
+  action.textContent = progress > 0 ? '接着读 →' : '就读这篇 →';
   button.append(number, title, meta, action);
   button.addEventListener('click', () => openRandomItem(item.id));
   return button;
@@ -224,7 +281,7 @@ function drawRandomChoices() {
   elements.randomCards.classList.toggle('hidden', choices.length === 0);
   elements.randomRerollBtn.disabled = fullPool.length === 0;
   elements.randomPoolCount.textContent = fullPool.length > 0
-    ? `可抽 ${fullPool.length} 篇`
+    ? `共 ${fullPool.length} 篇可抽 · 7 天内不重复`
     : '随机池已清空';
 }
 
@@ -232,10 +289,8 @@ function drawRandomChoices() {
 function setPickerInert(on) {
   const background = [
     document.querySelector('.header'),
-    document.querySelector('.controls'),
     elements.emptyState,
     elements.list,
-    elements.footer,
   ];
   for (const el of background) {
     if (!el) continue;
@@ -307,7 +362,7 @@ async function openRandomItem(itemId) {
       // 兼容尚未重载的新旧后台：页面已经打开，冷却记录会在重载后恢复。
     }
     closeRandomPicker();
-    showToast('🎲 已从历史积压中抽出一篇');
+    showToast('已从历史积压中抽出一篇');
   } catch (error) {
     elements.randomError.textContent = error.message || '无法打开所选页面';
     elements.randomError.classList.remove('hidden');
@@ -331,7 +386,8 @@ function currentView() {
 }
 
 function visibleSignature(view = currentView()) {
-  return itemsSignature(view.items, { progressSensitive: PROGRESS_SENSITIVE_SORTS.includes(viewState.sort) });
+  const grouping = isGroupedSort() ? 'grouped|' : '';
+  return grouping + itemsSignature(view.items, { progressSensitive: PROGRESS_SENSITIVE_SORTS.includes(viewState.sort) });
 }
 
 function resetPaging() {
@@ -401,7 +457,26 @@ function enterAnimation(el) {
   );
 }
 
-function shiftAnimation(el, dy) {
+// 卡片从网页那侧穿过边界：新行顺着同一个方向从左滑入，底色轻闪一次。
+function arrivalAnimation(el, delay) {
+  if (prefersReducedMotion()) return null;
+  el.style.animationDelay = `${delay}ms`;
+  el.classList.add('arrived');
+  el.addEventListener('animationend', () => {
+    el.classList.remove('arrived');
+    el.style.animationDelay = '';
+  }, { once: true });
+  return el.animate(
+    [
+      { opacity: 0, transform: 'translateX(-48px)' },
+      { opacity: 1, transform: 'translateX(0)' },
+    ],
+    { duration: 300, delay, easing: 'cubic-bezier(.2,.8,.2,1)', fill: 'backwards' }
+  );
+}
+
+// delay > 0 时（等网页里的卡片飞到），行先停在旧位置，到点再让位。
+function shiftAnimation(el, dy, delay = 0) {
   if (prefersReducedMotion()) return null;
   if (Math.abs(dy) < 0.5) return null;
   return el.animate(
@@ -409,8 +484,44 @@ function shiftAnimation(el, dy) {
       { transform: `translateY(${dy}px)` },
       { transform: 'translateY(0)' },
     ],
-    { duration: 260, easing: 'cubic-bezier(.2,.8,.2,1)' }
+    { duration: 260, delay, easing: 'cubic-bezier(.2,.8,.2,1)', fill: 'backwards' }
   );
+}
+
+function expectArrival(itemId, delayMs) {
+  if (!itemId || !(delayMs > 0) || prefersReducedMotion()) return;
+  pendingArrival = { itemId, at: performance.now() + delayMs };
+}
+
+// 只用一次：取出还剩多久，过期或这一轮渲染里没有那一行就作罢。
+function takeArrival(nodes) {
+  const arrival = pendingArrival;
+  pendingArrival = null;
+  if (!arrival) return null;
+  const delay = Math.round(arrival.at - performance.now());
+  if (delay < 30 || !nodes.some((el) => el.dataset.id === arrival.itemId)) return null;
+  return { itemId: arrival.itemId, delay };
+}
+
+function isGroupedSort() {
+  return viewState.sort === 'addedDesc' || viewState.sort === 'addedAsc';
+}
+
+// 每组第一行带上 data-group，CSS 用伪元素画出组标题。
+function paintGroups(nodes, items) {
+  const grouped = isGroupedSort();
+  const now = new Date();
+  let previous = null;
+  nodes.forEach((el, index) => {
+    const group = grouped ? addedGroup(items[index].addedAt || 0, now) : null;
+    const label = group && group !== previous ? group : null;
+    previous = group;
+    if (label) {
+      if (el.dataset.group !== label) el.dataset.group = label;
+    } else if (el.dataset.group !== undefined) {
+      delete el.dataset.group;
+    }
+  });
 }
 
 // 把 DOM 变更和数据更新收进同一帧：先量旧位置，再改 DOM，再排 FLIP。
@@ -523,11 +634,11 @@ function createRow(item) {
     favicon.onerror = () => {
       const fallback = document.createElement('span');
       fallback.className = 'list-item-favicon list-item-favicon-fallback';
-      fallback.textContent = (getDomain(item.url)[0] || '?').toUpperCase();
+      fallback.textContent = faviconLetter(item.url);
       favicon.replaceWith(fallback);
     };
   } else {
-    favicon.textContent = (getDomain(item.url)[0] || '?').toUpperCase();
+    favicon.textContent = faviconLetter(item.url);
   }
 
   const content = document.createElement('div');
@@ -547,13 +658,16 @@ function createRow(item) {
     openItem(currentItem(item.id, item));
   });
 
-  const domainEl = document.createElement('div');
+  const metaEl = document.createElement('div');
+  metaEl.className = 'list-item-meta';
+  const domainEl = document.createElement('span');
   domainEl.className = 'list-item-domain';
 
   content.appendChild(titleEl);
-  content.appendChild(domainEl);
+  content.appendChild(metaEl);
+  metaEl.appendChild(domainEl);
 
-  const sourceEl = document.createElement('div');
+  const sourceEl = document.createElement('span');
   sourceEl.className = 'list-item-source';
   sourceEl.title = item.sourceUrl ? `打开来源：${item.sourceUrl}` : '打开来源';
   sourceEl.tabIndex = 0;
@@ -568,7 +682,7 @@ function createRow(item) {
       openSource(currentItem(item.id, item));
     }
   });
-  content.appendChild(sourceEl);
+  metaEl.appendChild(sourceEl);
 
   const actions = document.createElement('div');
   actions.className = 'list-item-actions';
@@ -585,7 +699,8 @@ function createRow(item) {
 
   const deleteBtn = document.createElement('button');
   deleteBtn.className = 'list-item-delete';
-  deleteBtn.textContent = '🗑';
+  deleteBtn.type = 'button';
+  deleteBtn.appendChild(icon('trash'));
   deleteBtn.title = '永久删除';
   deleteBtn.setAttribute('aria-label', '永久删除');
   deleteBtn.addEventListener('click', (e) => {
@@ -603,6 +718,7 @@ function createRow(item) {
 
   const cancelDeleteBtn = document.createElement('button');
   cancelDeleteBtn.className = 'list-item-cancel-delete';
+  cancelDeleteBtn.type = 'button';
   cancelDeleteBtn.textContent = '取消';
   cancelDeleteBtn.title = '取消删除';
   cancelDeleteBtn.tabIndex = -1;
@@ -631,9 +747,11 @@ const strikeAnimations = new WeakMap();
 
 // 与 CSS 中的删除线保持一致：取消已读时 class 会立刻移除，
 // 所以反向动画必须自己带上背景图，否则那一下是直接消失而不是滑走。
+const STRIKE_PER_LINE_MS = 260;
+const STRIKE_MAX_MS = 900;
 const STRIKE_LINE_IMAGE = 'linear-gradient(to bottom, '
-  + 'transparent calc(0.6em - 0.5px), var(--text) calc(0.6em - 0.5px), '
-  + 'var(--text) calc(0.6em + 0.5px), transparent calc(0.6em + 0.5px))';
+  + 'transparent calc(0.6em - 0.5px), var(--text-secondary) calc(0.6em - 0.5px), '
+  + 'var(--text-secondary) calc(0.6em + 0.5px), transparent calc(0.6em + 0.5px))';
 
 function clearStrikeInline(titleEl) {
   strikeAnimations.get(titleEl)?.cancel();
@@ -642,6 +760,8 @@ function clearStrikeInline(titleEl) {
   titleEl.style.backgroundSize = '';
   titleEl.style.backgroundRepeat = '';
   titleEl.style.backgroundPosition = '';
+  titleEl.style.removeProperty('box-decoration-break');
+  titleEl.style.removeProperty('-webkit-box-decoration-break');
 }
 
 function playStrikeAnimation(li, struck) {
@@ -656,8 +776,16 @@ function playStrikeAnimation(li, struck) {
     backgroundPosition: 'left top',
     backgroundSize: `${percent}% 1.4em`,
   });
-  const animation = titleEl.animate([frame(from), frame(to)],
-    { duration: 280, easing: 'ease-out', fill: 'forwards' });
+  // 动画期间临时用 slice：折行的几段被当成连起来的一长条，宽度从 0 长到 100% 时
+  // 就是第一行划完再划第二行；结束后清掉，静态样式仍是 clone（每行一条完整的线）。
+  titleEl.style.setProperty('box-decoration-break', 'slice');
+  titleEl.style.setProperty('-webkit-box-decoration-break', 'slice');
+  const lines = Math.max(1, titleEl.getClientRects().length);
+  const animation = titleEl.animate([frame(from), frame(to)], {
+    duration: Math.min(STRIKE_MAX_MS, STRIKE_PER_LINE_MS * lines),
+    easing: lines > 1 ? 'cubic-bezier(.4, .1, .6, 1)' : 'ease-out',
+    fill: 'forwards',
+  });
   strikeAnimations.set(titleEl, animation);
   animation.finished.then(() => {
     if (strikeAnimations.get(titleEl) === animation) clearStrikeInline(titleEl);
@@ -689,7 +817,7 @@ function paintProgress(row, li, item) {
   const state = rowStates.get(li);
   if (state) state.percent = item.scrollPercent;
   if (row.domainEl) {
-    row.domainEl.textContent = `${getDomain(item.url)} · ${formatTime(item.addedAt)}${percent > 0 ? ` · ${percent}%` : ''}`;
+    row.domainEl.textContent = `${getDomain(item.url)} · ${formatTime(item.addedAt)}`;
   }
   let progressContainer = row.content.querySelector('.scroll-progress');
   if (percent <= 0) {
@@ -699,16 +827,23 @@ function paintProgress(row, li, item) {
   if (!progressContainer) {
     progressContainer = document.createElement('div');
     progressContainer.className = 'scroll-progress';
+    const track = document.createElement('div');
+    track.className = 'scroll-progress-track';
     const progressBar = document.createElement('div');
     progressBar.className = 'scroll-progress-bar';
-    progressContainer.appendChild(progressBar);
+    track.appendChild(progressBar);
+    const label = document.createElement('span');
+    label.className = 'scroll-progress-label';
+    progressContainer.append(track, label);
     row.content.appendChild(progressContainer);
   }
   const bar = progressContainer.querySelector('.scroll-progress-bar');
-  if (!bar) return;
+  const label = progressContainer.querySelector('.scroll-progress-label');
+  if (!bar || !label) return;
   const width = `${Math.min(100, percent)}%`;
   if (bar.style.width !== width) bar.style.width = width;
-  bar.classList.toggle('complete', percent >= 100);
+  const text = percent >= 100 ? '读完了' : `读到 ${percent}%`;
+  if (label.textContent !== text) label.textContent = text;
 }
 
 // 整行内容刷新：只在值真的变了的时候写 DOM，避免无谓的重排与动画抖动。
@@ -718,8 +853,10 @@ function paintRow(li, item) {
   const state = rowStates.get(li) || {};
   const title = item.title || item.url;
   if (row.titleEl.textContent !== title) row.titleEl.textContent = title;
-  const sourceLabel = `来源 ${sourceText(item) || '未知'}`;
+  const source = sourceText(item);
+  const sourceLabel = source ? `来自 ${source}` : '';
   if (row.sourceEl.textContent !== sourceLabel) row.sourceEl.textContent = sourceLabel;
+  row.sourceEl.hidden = !source || source === getDomain(item.url);
   const sourceTitle = item.sourceUrl ? `打开来源：${item.sourceUrl}` : '打开来源';
   if (row.sourceEl.title !== sourceTitle) row.sourceEl.title = sourceTitle;
   if (row.readCheckbox.checked !== !!item.strikethrough) {
@@ -747,9 +884,33 @@ function patchRow(li, item) {
 
 function updateCount(total = null) {
   const visibleCount = total ?? currentView().total;
-  elements.count.textContent = visibleCount === viewState.list.length
-    ? `共 ${viewState.list.length} 项`
-    : `显示 ${visibleCount} / 共 ${viewState.list.length} 项`;
+  const all = viewState.list.length;
+  elements.count.textContent = visibleCount === all
+    ? `共 ${all} 篇`
+    : `显示 ${visibleCount} / 共 ${all} 篇`;
+  paintTabCounts();
+}
+
+// 筛选标签上的数字和「最久的一篇已等多少天」：一遍扫完整张表。
+function paintTabCounts() {
+  const counts = { all: 0, unread: 0, inProgress: 0, read: 0, complete: 0 };
+  let oldestUnread = Infinity;
+  for (const item of viewState.list) {
+    for (const filter of Object.keys(counts)) {
+      if (matchesItemFilter(item, filter)) counts[filter] += 1;
+    }
+    if (!item.strikethrough && getProgress(item) < 100) {
+      oldestUnread = Math.min(oldestUnread, item.firstAddedAt || item.addedAt || Infinity);
+    }
+  }
+  for (const tab of elements.filterTabs.querySelectorAll('.filter-tab')) {
+    const countEl = tab.querySelector('.tab-count');
+    const text = viewState.list.length ? String(counts[tab.dataset.filter] ?? '') : '';
+    if (countEl && countEl.textContent !== text) countEl.textContent = text;
+  }
+  const days = Number.isFinite(oldestUnread) ? Math.floor((Date.now() - oldestUnread) / DAY_MS) : 0;
+  const age = days >= 1 ? ` · 最久的一篇已等 ${days} 天` : '';
+  if (elements.backlogAge.textContent !== age) elements.backlogAge.textContent = age;
 }
 
 function openItem(item) {
@@ -801,7 +962,7 @@ function resetPendingDelete(exceptItemId = null) {
   if (exceptItemId && itemId !== exceptItemId) return;
   clearTimeout(timer);
   button.classList.remove('confirming');
-  button.textContent = '🗑';
+  button.replaceChildren(icon('trash'));
   button.title = '永久删除';
   button.setAttribute('aria-label', '永久删除');
   if (cancelButton) {
@@ -814,10 +975,11 @@ function resetPendingDelete(exceptItemId = null) {
 // alert/confirm 在侧边栏里会挡住整个界面：两步点击按钮代替。
 function createTwoStepButton(button, { label, confirmLabel, timeoutMs = 3000, onConfirm }) {
   let timer = null;
+  const labelEl = button.querySelector('.menu-label') || button;
   const reset = () => {
     if (timer !== null) clearTimeout(timer);
     timer = null;
-    button.textContent = label;
+    labelEl.textContent = label;
     button.classList.remove('confirming');
   };
   button.addEventListener('click', (event) => {
@@ -827,7 +989,7 @@ function createTwoStepButton(button, { label, confirmLabel, timeoutMs = 3000, on
       onConfirm();
       return;
     }
-    button.textContent = confirmLabel;
+    labelEl.textContent = confirmLabel;
     button.classList.add('confirming');
     timer = setTimeout(reset, timeoutMs);
   });
@@ -842,14 +1004,13 @@ function resetArmedButtons() {
 function updateEmptyState(visibleCount, totalCount) {
   const isEmpty = totalCount === 0;
   elements.emptyState.classList.toggle('hidden', !isEmpty && visibleCount > 0);
-  elements.footer.classList.toggle('hidden', isEmpty);
   if (isEmpty) {
-    elements.emptyState.querySelector('.empty-text').textContent = '暂无内容';
-    elements.emptyState.querySelector('.empty-hint').textContent = '点击上方按钮或右键菜单添加网页';
+    elements.emptyState.querySelector('.empty-text').textContent = '抽屉还是空的';
+    elements.emptyState.querySelector('.empty-hint').textContent = '在网页上右键，选「添加到稍后再看」\n或者点上方的「收下」';
     return;
   }
   if (visibleCount === 0) {
-    elements.emptyState.querySelector('.empty-text').textContent = '没有匹配项';
+    elements.emptyState.querySelector('.empty-text').textContent = '没有匹配的内容';
     elements.emptyState.querySelector('.empty-hint').textContent = '换个关键词或筛选条件试试';
     elements.emptyState.classList.remove('hidden');
   }
@@ -860,7 +1021,8 @@ function renderEmptyList() {
   elements.list.innerHTML = '';
   renderedSignature = '';
   updateEmptyState(0, viewState.list.length);
-  elements.count.textContent = viewState.list.length ? `显示 0 / 共 ${viewState.list.length} 项` : '';
+  elements.count.textContent = viewState.list.length ? `显示 0 / 共 ${viewState.list.length} 篇` : '';
+  paintTabCounts();
 }
 
 function createMoreRow(hiddenCount) {
@@ -869,7 +1031,7 @@ function createMoreRow(hiddenCount) {
   const button = document.createElement('button');
   button.type = 'button';
   button.className = 'list-more-btn';
-  button.textContent = `显示更多（还有 ${hiddenCount} 项）`;
+  button.textContent = `显示更多（还有 ${hiddenCount} 篇）`;
   button.addEventListener('click', (event) => {
     event.stopPropagation();
     viewState.pageSize += ROW_PAGE_SIZE;
@@ -882,6 +1044,8 @@ function createMoreRow(hiddenCount) {
 // keyed 复用：条目 DOM 只创建一次，筛选/排序/进度更新不再推倒重来。
 function renderList(list = viewState.list) {
   viewState.list = list;
+  // 删除/清空/导入等路径会先改 viewState.list 再调 renderList，所以这里不能拿它来判断「列表变没变」。
+  if (list !== savedUrls.list) paintCurrentCard();
   const view = currentView();
   const visibleList = view.items;
   if (visibleList.length === 0) {
@@ -935,15 +1099,23 @@ function renderList(list = viewState.list) {
     if (view.total > orderedNodes.length) {
       elements.list.appendChild(createMoreRow(view.total - orderedNodes.length));
     }
+    paintGroups(orderedNodes, visibleList);
+    const arrival = takeArrival(orderedNodes);
+    const shiftDelay = arrival ? arrival.delay : 0;
     for (const el of orderedNodes) {
       const from = before.get(el.dataset.id);
       if (!from) {
-        if (!prefersReducedMotion()) rowAnimation(el.dataset.id).queue(() => enterAnimation(el));
+        if (prefersReducedMotion()) continue;
+        if (el.dataset.id === arrival?.itemId) {
+          rowAnimation(el.dataset.id).queue(() => arrivalAnimation(el, arrival.delay));
+        } else {
+          rowAnimation(el.dataset.id).queue(() => enterAnimation(el));
+        }
         continue;
       }
       const dy = from.top - el.getBoundingClientRect().top;
       if (Math.abs(dy) < 0.5) continue;
-      rowAnimation(el.dataset.id).queue(() => shiftAnimation(el, dy));
+      rowAnimation(el.dataset.id).queue(() => shiftAnimation(el, dy, shiftDelay));
     }
     renderedSignature = signature;
     updateEmptyState(orderedNodes.length, viewState.list.length);
@@ -984,11 +1156,133 @@ async function toggleStrikethrough(id) {
 async function addCurrentTab() {
   try {
     const result = await sendAction('list:addCurrent', { windowId: panelWindowId });
+    expectArrival(result.item?.id, result.arrivalDelayMs);
     renderList(result.list);
     showToast(result.duplicate ? '已在列表中，已移到顶部' : '已添加到稍后再看');
   } catch (error) {
     showToast(error.message);
   }
+}
+
+// —— 当前页卡片 ——
+
+function isCurrentTabSaved() {
+  return savedUrls.keys.has(normalizeUrl(currentTab.url));
+}
+
+function paintCurrentCard() {
+  if (savedUrls.list !== viewState.list) {
+    savedUrls = { list: viewState.list, keys: new Set(viewState.list.map((item) => item.normalizedUrl)) };
+  }
+  if (currentTab === undefined) return;
+  const supported = !!currentTab && isSupportedUrl(currentTab.url);
+  const saved = supported && isCurrentTabSaved();
+  elements.currentCard.classList.toggle('unsupported', !supported);
+  elements.currentLabel.textContent = saved ? '已在抽屉里' : '当前页';
+  elements.currentTitle.textContent = supported
+    ? (currentTab.title || currentTab.url)
+    : '这个页面不能收下';
+  elements.currentTitle.title = supported ? currentTab.url : '';
+  elements.addLabel.textContent = saved ? '置顶' : '收下';
+  elements.addBtn.classList.toggle('is-saved', saved);
+  elements.addBtn.disabled = !supported;
+  elements.addBtn.title = saved ? '已经收过了，再点一次移到最上面' : '把当前页收进稍后再看';
+
+  const favicon = elements.currentFavicon;
+  const iconUrl = supported && /^(https?:|data:image\/)/.test(currentTab.favIconUrl || '') ? currentTab.favIconUrl : '';
+  if (favicon.dataset.src === iconUrl && favicon.childNodes.length) return;
+  favicon.dataset.src = iconUrl;
+  const letter = supported ? faviconLetter(currentTab.url) : '·';
+  if (!iconUrl) {
+    favicon.textContent = letter;
+    return;
+  }
+  const img = document.createElement('img');
+  img.alt = '';
+  img.onerror = () => { favicon.textContent = letter; };
+  img.src = iconUrl;
+  favicon.replaceChildren(img);
+}
+
+async function refreshCurrentTab() {
+  try {
+    const query = Number.isInteger(panelWindowId)
+      ? { active: true, windowId: panelWindowId }
+      : { active: true, currentWindow: true };
+    const [tab] = await chrome.tabs.query(query);
+    currentTab = tab || null;
+  } catch {
+    currentTab = null;
+  }
+  paintCurrentCard();
+}
+
+function watchCurrentTab() {
+  chrome.tabs.onActivated.addListener(({ windowId }) => {
+    if (windowId === panelWindowId) refreshCurrentTab();
+  });
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    if (tabId !== currentTab?.id) return;
+    if (changeInfo.title || changeInfo.url || changeInfo.favIconUrl) refreshCurrentTab();
+  });
+}
+
+// —— 筛选标签 / 搜索 / 更多菜单 ——
+
+function paintFilterTabs() {
+  for (const tab of elements.filterTabs.querySelectorAll('.filter-tab')) {
+    const selected = tab.dataset.filter === viewState.filter;
+    tab.setAttribute('aria-selected', String(selected));
+    tab.tabIndex = selected ? 0 : -1;
+  }
+}
+
+function selectFilter(filter) {
+  if (!FILTER_VALUES.has(filter) || filter === viewState.filter) return;
+  viewState.filter = filter;
+  paintFilterTabs();
+  resetPaging();
+  renderList();
+  saveViewState();
+}
+
+function handleFilterKeys(event) {
+  if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+  const tabs = [...elements.filterTabs.querySelectorAll('.filter-tab')];
+  const index = tabs.findIndex((tab) => tab.dataset.filter === viewState.filter);
+  const next = tabs[(index + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length];
+  event.preventDefault();
+  selectFilter(next.dataset.filter);
+  next.focus();
+}
+
+function setSearchOpen(open) {
+  elements.searchRow.classList.toggle('hidden', !open);
+  elements.searchToggle.setAttribute('aria-expanded', String(open));
+  if (open) {
+    elements.searchInput.focus();
+    return;
+  }
+  if (elements.searchInput.value) {
+    elements.searchInput.value = '';
+    viewState.query = '';
+    resetPaging();
+    scheduleSearchRender();
+  }
+}
+
+function setMenuOpen(open) {
+  elements.moreMenu.classList.toggle('open', open);
+  elements.moreBtn.setAttribute('aria-expanded', String(open));
+  if (open) {
+    elements.moreMenu.querySelector('.menu-item')?.focus();
+  } else {
+    resetArmedButtons();
+  }
+}
+
+function isMenuOpen() {
+  return elements.moreMenu.classList.contains('open');
 }
 
 async function clearAll() {
@@ -1046,6 +1340,7 @@ function patchProgressRow(itemId) {
   if (!li?._readLater) return;
   const from = li.getBoundingClientRect();
   paintRow(li, item);
+  paintTabCounts();
   // 进度条首次出现会让本行变高，下方条目补一次平滑让位。这里在同一帧内量完前后位置。
   const to = li.getBoundingClientRect();
   if (Math.abs(from.top - to.top) >= 0.5 || Math.abs(from.height - to.height) >= 0.5) {
@@ -1055,7 +1350,7 @@ function patchProgressRow(itemId) {
 
 // —— 视图状态持久化 ——
 
-const FILTER_VALUES = new Set([...elements.filterSelect.options].map((option) => option.value));
+const FILTER_VALUES = new Set([...elements.filterTabs.querySelectorAll('.filter-tab')].map((tab) => tab.dataset.filter));
 const SORT_VALUES = new Set([...elements.sortSelect.options].map((option) => option.value));
 
 async function loadViewState() {
@@ -1065,7 +1360,6 @@ async function loadViewState() {
     if (!saved || typeof saved !== 'object') return;
     if (FILTER_VALUES.has(saved.filter)) viewState.filter = saved.filter;
     if (SORT_VALUES.has(saved.sort)) viewState.sort = saved.sort;
-    elements.filterSelect.value = viewState.filter;
     elements.sortSelect.value = viewState.sort;
   } catch {
     // 读不到就用默认视图。
@@ -1086,6 +1380,9 @@ function handlePanelMessage(msg) {
   }
   if (msg.type === 'listUpdated') {
     const cameFromAnotherWindow = msg.originWindowId === null || msg.originWindowId !== panelWindowId;
+    if (msg.arrival && msg.arrival.windowId === panelWindowId) {
+      expectArrival(msg.arrival.itemId, msg.arrival.delayMs);
+    }
     if (cameFromAnotherWindow) {
       flushFrameQueue();
       renderList(msg.list || []);
@@ -1155,6 +1452,8 @@ async function init() {
   panelWindowId = await resolvePanelWindowId();
   connectPanelPort();
   await loadViewState();
+  paintFilterTabs();
+  watchCurrentTab();
 
   try {
     const list = await getList();
@@ -1163,6 +1462,7 @@ async function init() {
     renderList([]);
     showToast(error.message || '列表加载失败');
   }
+  refreshCurrentTab();
 
   elements.addBtn.addEventListener('click', addCurrentTab);
   elements.randomBtn.addEventListener('click', openRandomPicker);
@@ -1176,16 +1476,29 @@ async function init() {
     requestAnimationFrame(() => elements.randomPicker.classList.add('show'));
   });
   elements.randomPicker.addEventListener('keydown', trapPickerFocus);
+  elements.searchToggle.addEventListener('click', () => {
+    setSearchOpen(elements.searchRow.classList.contains('hidden'));
+  });
+  elements.searchInput.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape') return;
+    event.stopPropagation();
+    setSearchOpen(false);
+    elements.searchToggle.focus();
+  });
+  elements.filterTabs.addEventListener('click', (event) => {
+    const tab = event.target.closest('.filter-tab');
+    if (tab) selectFilter(tab.dataset.filter);
+  });
+  elements.filterTabs.addEventListener('keydown', handleFilterKeys);
+  elements.moreBtn.addEventListener('click', (event) => {
+    event.stopPropagation();
+    setMenuOpen(!isMenuOpen());
+  });
+  elements.moreMenu.addEventListener('click', (event) => event.stopPropagation());
   elements.searchInput.addEventListener('input', (e) => {
     viewState.query = e.target.value;
     resetPaging();
     scheduleSearchRender();
-  });
-  elements.filterSelect.addEventListener('change', (e) => {
-    viewState.filter = e.target.value;
-    resetPaging();
-    renderList();
-    saveViewState();
   });
   elements.sortSelect.addEventListener('change', (e) => {
     viewState.sort = e.target.value;
@@ -1196,26 +1509,40 @@ async function init() {
   document.addEventListener('click', () => {
     resetPendingDelete();
     resetArmedButtons();
+    if (isMenuOpen()) setMenuOpen(false);
   });
   createTwoStepButton(elements.clearBtn, {
     label: '清空全部',
     confirmLabel: '确认清空？',
-    onConfirm: clearAll,
+    onConfirm: () => {
+      setMenuOpen(false);
+      clearAll();
+    },
   });
   createTwoStepButton(elements.reloadBtn, {
-    label: '🔄',
+    label: '重新加载扩展',
     confirmLabel: '确认重载？',
     onConfirm: () => chrome.runtime.reload(),
   });
-  elements.exportBtn.addEventListener('click', exportData);
-  elements.importBtn.addEventListener('click', () => elements.importFileInput.click());
+  elements.exportBtn.addEventListener('click', () => {
+    setMenuOpen(false);
+    exportData();
+  });
+  elements.importBtn.addEventListener('click', () => {
+    setMenuOpen(false);
+    elements.importFileInput.click();
+  });
   elements.importFileInput.addEventListener('change', (e) => {
     if (e.target.files[0]) { importData(e.target.files[0]); e.target.value = ''; }
   });
   document.addEventListener('keydown', (event) => {
-    if (event.key === 'Escape' && !elements.randomPicker.classList.contains('hidden')) {
-      closeRandomPicker();
+    if (event.key !== 'Escape') return;
+    if (isMenuOpen()) {
+      setMenuOpen(false);
+      elements.moreBtn.focus();
+      return;
     }
+    if (!elements.randomPicker.classList.contains('hidden')) closeRandomPicker();
   });
 }
 

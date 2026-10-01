@@ -12,6 +12,8 @@ import {
   urlsReferToSameDocument,
 } from './core.mjs';
 import {
+  ADD_FLIGHT_ARRIVAL_MS,
+  BADGE_FLASH_MS,
   CONTEXT_TTL_MS,
   PANEL_CLOSE_GRACE_MS,
   PROGRESS_FLUSH_DELAY_MS,
@@ -164,8 +166,8 @@ function broadcastPanel(message) {
   }
 }
 
-function broadcastList(outcome, { feedback, originWindowId = null } = {}) {
-  broadcastPanel({ type: 'listUpdated', list: outcome.list, feedback, originWindowId });
+function broadcastList(outcome, { feedback, originWindowId = null, arrival = null } = {}) {
+  broadcastPanel({ type: 'listUpdated', list: outcome.list, feedback, originWindowId, arrival });
 }
 
 // 页面内的点击监听只在侧边栏打开时才需要：否则每次点击都会把 Service Worker 叫醒。
@@ -179,22 +181,62 @@ function setWindowClickWatch(windowId, enabled) {
   }).catch(() => {});
 }
 
+function isPanelOpen(windowId) {
+  const state = panelStates.get(windowId);
+  return !!state && !state.closing;
+}
+
+// 侧边栏关着时，网页里画不到工具栏：让真正的扩展图标闪一下角标，等卡片飞到右上角时再亮。
+function flashActionBadge(tabId, duplicate) {
+  if (tabId === undefined || !chrome.action?.setBadgeText) return;
+  const quietly = (call) => Promise.resolve().then(call).catch(() => {});
+  setTimeout(() => {
+    quietly(() => chrome.action.setBadgeBackgroundColor({ tabId, color: '#2E5E4E' }));
+    quietly(() => chrome.action.setBadgeTextColor({ tabId, color: '#FFFFFF' }));
+    quietly(() => chrome.action.setBadgeText({ tabId, text: duplicate ? '↑' : '+1' }));
+    setTimeout(() => quietly(() => chrome.action.setBadgeText({ tabId, text: '' })), BADGE_FLASH_MS);
+  }, ADD_FLIGHT_ARRIVAL_MS);
+}
+
 // 动画脚本按需注入：不再给所有站点常驻一份解析成本，也顺带解决「脚本还没加载」的时序问题。
-async function playAddAnimation(tabId, payload) {
-  if (tabId === undefined) return;
-  const message = { type: 'playAddAnimation', animationId: crypto.randomUUID(), ...payload };
+// 返回网页里是否真的播上了动画：面板只在播上时才推迟新行入场。
+// 只认动画脚本的 { played: true } 回话：常驻的 content-context.js 也会让 sendMessage「成功」，
+// 但它并不播放动画——只看有没有抛错的话，正常页面上动画脚本永远不会被注入。
+async function sendAddAnimation(tabId, message) {
   try {
-    await chrome.tabs.sendMessage(tabId, message);
-    return;
+    const response = await chrome.tabs.sendMessage(tabId, message);
+    if (response?.played) return true;
   } catch {
-    // 落下去注入再补发一次。
+    // 页面上还没有任何监听者，落下去注入。
   }
   try {
     await chrome.scripting.executeScript({ target: { tabId }, files: ['content-add-animation.js'] });
-    await chrome.tabs.sendMessage(tabId, message);
+    const response = await chrome.tabs.sendMessage(tabId, message);
+    return !!response?.played;
   } catch {
     // 内部页或未获授权页面不支持网页内动画，保存仍然成功。
+    return false;
   }
+}
+
+async function playAddAnimation(tab, payload) {
+  const tabId = tab?.id;
+  if (tabId === undefined) return { arrivalDelayMs: 0 };
+  const panelOpen = isPanelOpen(tab.windowId);
+  const message = { type: 'playAddAnimation', animationId: crypto.randomUUID(), panelOpen, ...payload };
+  const played = await sendAddAnimation(tabId, message);
+  if (!panelOpen) flashActionBadge(tabId, payload.duplicate);
+  return { arrivalDelayMs: played && panelOpen ? ADD_FLIGHT_ARRIVAL_MS : 0 };
+}
+
+function animationPayload(outcome, extra = {}) {
+  return {
+    duplicate: outcome.duplicate,
+    label: outcome.item.title || outcome.item.url,
+    domain: getDomain(outcome.item.url),
+    favicon: outcome.item.favicon,
+    ...extra,
+  };
 }
 
 async function openTrackedItem({ id, url, scrollY = 0, scrollPercent = 0 }) {
@@ -283,11 +325,8 @@ const panelActions = {
     const item = buildItem({ url: tab.url, title: tab.title, tab, source });
     const outcome = await mutateList((list) => addOrBumpItem(list, item));
     broadcastList(outcome, { originWindowId: message.windowId });
-    playAddAnimation(tab.id, {
-      duplicate: outcome.duplicate,
-      label: outcome.item.title || outcome.item.url,
-    });
-    return { duplicate: outcome.duplicate, item: outcome.item, list: outcome.list };
+    const { arrivalDelayMs } = await playAddAnimation(tab, animationPayload(outcome));
+    return { duplicate: outcome.duplicate, item: outcome.item, list: outcome.list, arrivalDelayMs };
   },
 
   'list:toggleRead': async (message) => {
@@ -517,15 +556,16 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 
   const source = buildSource(tab, info.pageUrl);
   const item = buildItem({ url, title, tab, source });
-  mutateList((list) => addOrBumpItem(list, item)).then((outcome) => {
-    broadcastList(outcome, { feedback: outcome.duplicate
-      ? '已在列表中，已移到顶部'
-      : `已添加：${outcome.item.title || outcome.item.url}` });
-    playAddAnimation(tab?.id, {
-      duplicate: outcome.duplicate,
-      label: outcome.item.title || outcome.item.url,
-      x: pending?.x,
-      y: pending?.y,
+  mutateList((list) => addOrBumpItem(list, item)).then(async (outcome) => {
+    // 先让网页里的卡片起飞，再通知面板：面板要知道卡片几时落到边缘，好让新行接着滑进来。
+    const { arrivalDelayMs } = await playAddAnimation(tab, animationPayload(outcome, { x: pending?.x, y: pending?.y }));
+    broadcastList(outcome, {
+      feedback: outcome.duplicate
+        ? '已在列表中，已移到顶部'
+        : `已添加：${outcome.item.title || outcome.item.url}`,
+      arrival: arrivalDelayMs > 0
+        ? { itemId: outcome.item.id, windowId: tab?.windowId, delayMs: arrivalDelayMs }
+        : null,
     });
   }).catch(() => {});
 });
