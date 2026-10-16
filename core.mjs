@@ -5,7 +5,8 @@ export const RANDOM_PICK_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000;
 
 // 存储形态版本：写盘时给每条记录打上 v，读回时命中就能跳过全部 URL 解析。
 // 字段语义变化时 +1，旧记录会自然走一次完整的规范化迁移。
-export const SCHEMA_VERSION = 3;
+// 4：滚不动的页面不再记 100%，迁移时清掉 v3 里「没滚过却读完了」的进度。
+export const SCHEMA_VERSION = 4;
 export const MAX_TEXT_LENGTH = 2000;
 // data: URL 形式的图标会占 storage.local 配额（默认约 10 MB），太长的一律丢弃。
 export const MAX_FAVICON_DATA_URL_LENGTH = 4096;
@@ -172,6 +173,13 @@ function migrateRawItem(raw, { now, usedIds, usedUrls, makeId }) {
   else delete item.scrollPercent;
   if (Number.isFinite(raw.scrollY)) item.scrollY = Math.max(0, Math.round(raw.scrollY));
   else delete item.scrollY;
+  // v3 的追踪脚本把「暂时滚不动」（懒加载还没撑开）记成 100%，后台又只增不减，
+  // 这些条目永远停在读完、也进不了随机池。scrollY 为 0 说明根本没往下滚过：进度作废，下次重新量。
+  // 导入会先去掉 v，备份里的记录不受影响。
+  if (raw.v === 3 && item.scrollPercent >= 100 && !(item.scrollY > 0)) {
+    delete item.scrollPercent;
+    delete item.scrollY;
+  }
   if (validTimestamp(raw.lastRandomPickedAt)) item.lastRandomPickedAt = raw.lastRandomPickedAt;
   else delete item.lastRandomPickedAt;
   if (typeof raw.strikethrough !== 'boolean') delete item.strikethrough;
