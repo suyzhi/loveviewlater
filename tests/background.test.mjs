@@ -1,8 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { ADD_FLIGHT_ARRIVAL_MS } from '../constants.mjs';
+
 // —— 最小 chrome 桩：只覆盖 background.js 用到的 API ——
-function createChromeStub({ local = {}, session = {}, activeTab = null } = {}) {
+// tabMessageResponse 决定网页一侧怎么回话（比如动画脚本回 { played: true }）。
+function createChromeStub({ local = {}, session = {}, activeTab = null, tabMessageResponse } = {}) {
   const listeners = {
     message: [],
     connect: [],
@@ -12,6 +15,7 @@ function createChromeStub({ local = {}, session = {}, activeTab = null } = {}) {
     tabRemoved: [],
     actionClicked: [],
     menuClicked: [],
+    command: [],
     storageChanged: [],
   };
   const writes = [];
@@ -64,7 +68,10 @@ function createChromeStub({ local = {}, session = {}, activeTab = null } = {}) {
     tabs: {
       async query() { return activeTab ? [activeTab] : []; },
       async create() { return { id: 7 }; },
-      async sendMessage(tabId, message) { sentMessages.push({ tabId, message }); },
+      async sendMessage(tabId, message) {
+        sentMessages.push({ tabId, message });
+        return tabMessageResponse?.(message);
+      },
       onUpdated: { addListener: (fn) => listeners.tabUpdated.push(fn) },
       onRemoved: { addListener: (fn) => listeners.tabRemoved.push(fn) },
     },
@@ -79,6 +86,9 @@ function createChromeStub({ local = {}, session = {}, activeTab = null } = {}) {
       create() {},
       removeAll(callback) { callback?.(); },
       onClicked: { addListener: (fn) => listeners.menuClicked.push(fn) },
+    },
+    commands: {
+      onCommand: { addListener: (fn) => listeners.command.push(fn) },
     },
   };
 
@@ -221,6 +231,82 @@ test('右键添加只写一次存储，并带上写入 stamp', async () => {
   assert.equal(stub.writes[0].readLaterList.length, 1);
   assert.equal(stub.writes[0].readLaterList[0].title, '标题');
   assert.ok(stub.writes[0].readLaterListStamp, '写入要带 stamp 才能区分外部改动');
+});
+
+// 模拟一个已登记的侧边栏端口，收集后台推给面板的消息。
+function connectPanel(stub, windowId) {
+  const messages = [];
+  const onMessage = [];
+  const port = {
+    name: 'sidePanel',
+    postMessage: (message) => messages.push(message),
+    onMessage: { addListener: (fn) => onMessage.push(fn) },
+    onDisconnect: { addListener() {} },
+  };
+  stub.listeners.connect[0](port);
+  for (const fn of onMessage) fn({ type: 'registerPanel', windowId });
+  return messages;
+}
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+test('快捷键添加当前页：一次写盘、网页里播动画、面板拿到反馈和入场时机；再按一次只置顶', async () => {
+  const tab = { id: 3, url: 'https://example.com/article', title: '当前文章', windowId: 1 };
+  const stub = await loadBackground({
+    activeTab: tab,
+    tabMessageResponse: (message) => (message.type === 'playAddAnimation' ? { played: true } : undefined),
+  });
+  const panelMessages = connectPanel(stub, 1);
+  const onCommand = stub.listeners.command[0];
+  assert.ok(onCommand, 'background 应该注册了快捷键监听');
+  const animations = () => stub.sentMessages
+    .filter(({ message }) => message.type === 'playAddAnimation')
+    .map(({ tabId, message }) => ({ tabId, ...message }));
+  const lastUpdate = () => panelMessages.filter((message) => message.type === 'listUpdated').at(-1);
+
+  onCommand('add-current-page', tab);
+  await settle();
+  assert.equal(stub.writes.length, 1, '添加只写一次存储');
+  const [item] = stub.writes[0].readLaterList;
+  assert.equal(stub.writes[0].readLaterList.length, 1);
+  assert.equal(item.url, tab.url);
+  assert.equal(item.title, '当前文章');
+  assert.equal(item.sourceDomain, 'example.com');
+
+  assert.equal(animations().length, 1, '动画脚本回过话就不再注入');
+  const [flight] = animations();
+  assert.equal(flight.tabId, 3);
+  assert.equal(flight.label, '当前文章');
+  assert.equal(flight.duplicate, false);
+  assert.equal(flight.panelOpen, true);
+  assert.equal(flight.x, undefined, '没有指针坐标，卡片从视口中央起飞');
+
+  assert.equal(lastUpdate().feedback, '已添加：当前文章');
+  assert.deepEqual(lastUpdate().arrival, { itemId: item.id, windowId: 1, delayMs: ADD_FLIGHT_ARRIVAL_MS });
+
+  onCommand('add-current-page', tab);
+  await settle();
+  assert.equal(stub.writes.length, 2);
+  assert.deepEqual(stub.writes[1].readLaterList.map((entry) => entry.id), [item.id], '重复添加不新增条目');
+  assert.equal(animations().at(-1).duplicate, true);
+  assert.equal(lastUpdate().feedback, '已在列表中，已移到顶部');
+});
+
+test('快捷键在浏览器内部页上什么也不做，没带 tab 时退回查询当前标签页', async () => {
+  const stub = await loadBackground({ activeTab: { id: 5, url: 'https://example.com/fallback', title: '后备', windowId: 2 } });
+  const onCommand = stub.listeners.command[0];
+
+  onCommand('add-current-page', { id: 4, url: 'edge://settings', title: '设置', windowId: 2 });
+  onCommand('some-other-command', { id: 5, url: 'https://example.com/other', windowId: 2 });
+  await settle();
+  assert.equal(stub.writes.length, 0);
+  assert.equal(stub.sentMessages.length, 0, '内部页不发动画');
+  assert.equal(stub.injected.length, 0, '内部页也不注入脚本');
+
+  onCommand('add-current-page');
+  await settle();
+  assert.equal(stub.writes.length, 1);
+  assert.equal(stub.writes[0].readLaterList[0].url, 'https://example.com/fallback');
 });
 
 test('存储被外部改写时丢弃缓存', async () => {

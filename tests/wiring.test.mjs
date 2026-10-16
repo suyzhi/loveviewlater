@@ -22,6 +22,25 @@ test('manifest 引用的文件都存在', async () => {
   }
 });
 
+test('manifest 里的快捷键都有人接：_execute_action 走工具栏按钮，其余后台都有分支', async () => {
+  const [manifest, background] = await Promise.all([
+    read('manifest.json').then(JSON.parse),
+    read('background.js'),
+  ]);
+  const commands = Object.keys(manifest.commands || {});
+  assert.ok(commands.length > 0, 'manifest 应该声明了快捷键');
+  for (const name of commands) {
+    if (name === '_execute_action') {
+      // 有 popup 时浏览器会去开 popup，不再派发 action.onClicked，侧边栏开关就失灵了。
+      assert.equal(manifest.action.default_popup, undefined, '_execute_action 依赖 action.onClicked，不能配 popup');
+      assert.match(background, /chrome\.action\.onClicked\.addListener/);
+      continue;
+    }
+    assert.match(background, /chrome\.commands\.onCommand\.addListener/, '后台应该监听 commands.onCommand');
+    assert.match(background, new RegExp(`command [!=]== '${name}'`), `快捷键 ${name} 在 background.js 里没有处理`);
+  }
+});
+
 test('面板脚本用到的元素 id 都在 panel.html 里', async () => {
   const [script, html] = await Promise.all([
     read('sidepanel/panel.js'),

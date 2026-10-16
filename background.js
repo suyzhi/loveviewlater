@@ -524,6 +524,24 @@ chrome.action.onClicked.addListener((tab) => {
   closePanel(tab.windowId);
 });
 
+// 右键菜单和快捷键共用：加入或置顶 → 网页里播收下动画 → 通知面板（带反馈和新行入场时机）。
+// 没有指针坐标时（快捷键），卡片从视口中央起飞。
+async function addFromPage({ url, title, tab, source, x, y }) {
+  const item = buildItem({ url, title, tab, source });
+  const outcome = await mutateList((list) => addOrBumpItem(list, item));
+  // 先让网页里的卡片起飞，再通知面板：面板要知道卡片几时落到边缘，好让新行接着滑进来。
+  const { arrivalDelayMs } = await playAddAnimation(tab, animationPayload(outcome, { x, y }));
+  broadcastList(outcome, {
+    feedback: outcome.duplicate
+      ? '已在列表中，已移到顶部'
+      : `已添加：${outcome.item.title || outcome.item.url}`,
+    arrival: arrivalDelayMs > 0
+      ? { itemId: outcome.item.id, windowId: tab?.windowId, delayMs: arrivalDelayMs }
+      : null,
+  });
+  return outcome;
+}
+
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   prunePendingContexts();
   const pending = tab?.id !== undefined ? pendingContextByTab.get(tab.id) : null;
@@ -554,18 +572,30 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (tab?.id !== undefined) pendingContextByTab.delete(tab.id);
   if (!isSupportedUrl(url)) return;
 
-  const source = buildSource(tab, info.pageUrl);
-  const item = buildItem({ url, title, tab, source });
-  mutateList((list) => addOrBumpItem(list, item)).then(async (outcome) => {
-    // 先让网页里的卡片起飞，再通知面板：面板要知道卡片几时落到边缘，好让新行接着滑进来。
-    const { arrivalDelayMs } = await playAddAnimation(tab, animationPayload(outcome, { x: pending?.x, y: pending?.y }));
-    broadcastList(outcome, {
-      feedback: outcome.duplicate
-        ? '已在列表中，已移到顶部'
-        : `已添加：${outcome.item.title || outcome.item.url}`,
-      arrival: arrivalDelayMs > 0
-        ? { itemId: outcome.item.id, windowId: tab?.windowId, delayMs: arrivalDelayMs }
-        : null,
-    });
+  addFromPage({
+    url,
+    title,
+    tab,
+    source: buildSource(tab, info.pageUrl),
+    x: pending?.x,
+    y: pending?.y,
   }).catch(() => {});
+});
+
+// 快捷键（manifest 的 commands）。_execute_action 由浏览器直接派发成 action.onClicked，
+// 侧边栏的开关因此仍在用户手势里；这里只处理「添加当前页」。
+async function addActiveTab(tab) {
+  const target = tab || (await chrome.tabs.query({ active: true, lastFocusedWindow: true }))[0];
+  // 和右键一样：浏览器内部页、扩展页这类地址直接忽略。
+  if (!target || !isSupportedUrl(target.url)) return null;
+  return addFromPage({
+    url: target.url,
+    title: target.title || target.url,
+    tab: target,
+    source: buildSource(target, target.url),
+  });
+}
+
+chrome.commands.onCommand.addListener((command, tab) => {
+  if (command === 'add-current-page') addActiveTab(tab).catch(() => {});
 });
