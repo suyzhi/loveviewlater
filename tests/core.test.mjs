@@ -210,6 +210,52 @@ test('版本号对不上时回到完整迁移，并修掉越界数据', () => {
   assert.equal(migrated[0].scrollPercent, 100);
 });
 
+test('v3 里没滚过却记成 100% 的进度在升级时作废，其余进度原样保留', () => {
+  const base = {
+    v: 3,
+    title: 'x',
+    addedAt: 1,
+    firstAddedAt: 1,
+    sourceTitle: 'x',
+    sourceDomain: 'example.com',
+  };
+  const record = (id, extra) => ({
+    ...base,
+    id,
+    url: `https://example.com/${id}`,
+    normalizedUrl: `https://example.com/${id}`,
+    sourceUrl: `https://example.com/${id}`,
+    ...extra,
+  });
+  const byId = new Map(normalizeStoredList([
+    record('pinned', { scrollPercent: 100, scrollY: 0 }),
+    record('pinned-no-y', { scrollPercent: 100 }),
+    record('read', { scrollPercent: 100, scrollY: 2400 }),
+    record('partial', { scrollPercent: 40, scrollY: 0 }),
+  ]).map((item) => [item.id, item]));
+
+  for (const id of ['pinned', 'pinned-no-y']) {
+    assert.equal(byId.get(id).v, SCHEMA_VERSION);
+    assert.equal(byId.get(id).scrollPercent, undefined, `${id} 的假进度应该清掉`);
+    assert.equal(byId.get(id).scrollY, undefined);
+  }
+  assert.equal(byId.get('read').scrollPercent, 100, '真的滚到底的记录不动');
+  assert.equal(byId.get('read').scrollY, 2400);
+  assert.equal(byId.get('partial').scrollPercent, 40);
+
+  // 当前版本写出的 100%（短页面停留够久后离开）是可信的，走快速路径原样保留。
+  const current = normalizeStoredList([record('short', { v: SCHEMA_VERSION, scrollPercent: 100, scrollY: 0 })]);
+  assert.equal(current[0].scrollPercent, 100);
+
+  // 导入先去掉 v：备份文件里的记录不会被当成 v3 修掉。
+  const imported = prepareImport({
+    version: 2,
+    list: [record('backup', { scrollPercent: 100, scrollY: 0 })],
+  }, []);
+  assert.equal(imported.imported, 1);
+  assert.equal(imported.list[0].scrollPercent, 100);
+});
+
 test('快速路径同样做去重与 id 兜底', () => {
   const base = {
     v: SCHEMA_VERSION,
