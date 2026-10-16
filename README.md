@@ -6,6 +6,8 @@
 
 - **添加当前页面**：侧边栏顶部的「当前页」卡片显示正在看的网页，点「收下」即可；已收过的会显示「已在抽屉里」，按钮变成「置顶」。也可以右键页面空白处选择「添加到稍后再看」
 - **添加链接**：右键任意链接 → 「链接添加到稍后再看」
+- **快捷键**：`Alt+Shift+L` 打开/关闭侧边栏；`Alt+Shift+S` 把当前页加入稍后再看，和右键添加一样播放收下动画，已收过的只置顶（浏览器内部页上不起作用）。
+  这两个是建议键位，和别的扩展冲突时浏览器不会分配，可以在 `chrome://extensions/shortcuts`（Edge 是 `edge://extensions/shortcuts`）查看或改绑；没用 `Ctrl+Shift+S` 是因为 Edge 把它留给了网页截图
 - **查看列表**：点击工具栏图标打开/关闭右侧边栏，按添加时间倒序排列，并分成「今天 / 本周 / 更早」三组；点击页面任意处会关闭侧边栏
 - **搜索、筛选、排序**：点放大镜展开搜索框，按标题、网址或来源搜索；筛选标签（全部/未读/在读/已读/读完）带数量；筛选与排序会被记住
 - **命运三选一**：从未读、未完成的历史积压中加权抽取三篇，越早收藏越容易出现；抽中后 7 天内不重复
@@ -37,7 +39,7 @@
 ## 技术栈
 
 - Manifest V3（`minimum_chrome_version` 114，Side Panel API 的下限）
-- Side Panel API / Context Menus API / Storage API / Scripting API
+- Side Panel API / Context Menus API / Commands API / Storage API / Scripting API
 - 零运行时依赖；开发依赖只有 ESLint
 
 ## 性能约定

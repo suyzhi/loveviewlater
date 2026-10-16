@@ -32,6 +32,16 @@
       "128": "icons/icon128.png"
     }
   },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": { "default": "Alt+Shift+L" },
+      "description": "打开/关闭稍后再看侧边栏"
+    },
+    "add-current-page": {
+      "suggested_key": { "default": "Alt+Shift+S" },
+      "description": "把当前页面添加到稍后再看"
+    }
+  },
   "side_panel": {
     "default_path": "sidepanel/panel.html"
   },
