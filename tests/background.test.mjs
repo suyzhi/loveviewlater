@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { SCHEMA_VERSION } from '../core.mjs';
+
 // —— 最小 chrome 桩：只覆盖 background.js 用到的 API ——
 function createChromeStub({ local = {}, session = {}, activeTab = null } = {}) {
   const listeners = {
@@ -141,7 +143,7 @@ test('list:get 是纯读：不写存储，并且第二次调用不再读存储',
   assert.equal(stub.writes.length, 0, '读列表不应该触发整表回写');
   assert.equal(first.data.list.length, 1);
   assert.equal(first.data.list[0].favicon, undefined, '遗留的 Google 图标应被清掉');
-  assert.equal(first.data.list[0].v, 3, '规范化后应带上形态版本号');
+  assert.equal(first.data.list[0].v, SCHEMA_VERSION, '规范化后应带上形态版本号');
 
   let reads = 0;
   const originalGet = stub.chrome.storage.local.get;
@@ -155,7 +157,7 @@ test('list:get 是纯读：不写存储，并且第二次调用不再读存储',
 });
 
 test('结构变更立刻落盘，滚动进度先攒着，强制上报才落盘', async () => {
-  const stub = await loadBackground({ local: { readLaterList: [{ ...ITEM, v: 3 }] } });
+  const stub = await loadBackground({ local: { readLaterList: [{ ...ITEM, v: SCHEMA_VERSION }] } });
 
   await sendMessage(stub, { type: 'list:toggleRead', itemId: 'item-1' });
   assert.equal(stub.writes.length, 1, '标记已读必须立刻落盘');
@@ -175,7 +177,7 @@ test('结构变更立刻落盘，滚动进度先攒着，强制上报才落盘',
 
 test('滚动进度的合并窗口到点后自动落盘，标签页状态也是攒着写', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
-  const stub = await loadBackground({ local: { readLaterList: [{ ...ITEM, v: 3 }] } });
+  const stub = await loadBackground({ local: { readLaterList: [{ ...ITEM, v: SCHEMA_VERSION }] } });
   await bindTrackedTab(stub, ITEM.url);
 
   // 追踪状态写 session 也走一个短合并窗口，避免标签页抖动时反复写。
@@ -224,11 +226,11 @@ test('右键添加只写一次存储，并带上写入 stamp', async () => {
 });
 
 test('存储被外部改写时丢弃缓存', async () => {
-  const stub = await loadBackground({ local: { readLaterList: [{ ...ITEM, v: 3 }] } });
+  const stub = await loadBackground({ local: { readLaterList: [{ ...ITEM, v: SCHEMA_VERSION }] } });
   await sendMessage(stub, { type: 'list:get' });
 
   // 模拟别的上下文直接写存储：没有 stamp 的变更必须让缓存失效。
-  stub.localStore.readLaterList = [{ ...ITEM, id: 'external', v: 3 }];
+  stub.localStore.readLaterList = [{ ...ITEM, id: 'external', v: SCHEMA_VERSION }];
   for (const fn of stub.listeners.storageChanged) {
     fn({ readLaterList: { oldValue: [ITEM], newValue: stub.localStore.readLaterList } }, 'local');
   }

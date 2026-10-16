@@ -13,6 +13,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { SCHEMA_VERSION } from '../core.mjs';
+
 const EXT_DIR = fileURLToPath(new URL('..', import.meta.url));
 const HTTP_PORT = Number(process.env.SMOKE_HTTP || 8791);
 const CDP_PORT = Number(process.env.SMOKE_CDP || 9333);
@@ -230,7 +232,7 @@ check(struck.cls && struck.checked && storedStruck === '[true]', '标记已读�
 
 // 6. 分页：外部写入 -> 缓存失效 -> 面板重载
 const seed = JSON.stringify(Array.from({ length: 250 }, (_, index) => ({
-  v: 3,
+  v: SCHEMA_VERSION,
   id: `seed-${index}`,
   title: `种子文章 ${index}`,
   url: `https://example.com/post/${index}`,
